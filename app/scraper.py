@@ -326,9 +326,50 @@ def resolve_download_page(session: requests.Session, variant_url: str) -> str:
     raise RuntimeError("无法在 Variant 页面找到下载页入口")
 
 
+def _extract_post_id(soup: BeautifulSoup, html: str) -> Optional[str]:
+    """从 WordPress 页面提取文章 ID（用于构造 download.php?id= 链接）。"""
+    # 1. <body class="... postid-12345 ...">
+    body = soup.find("body")
+    if body:
+        classes = body.get("class") or []
+        if isinstance(classes, str):
+            classes = classes.split()
+        for cls in classes:
+            m = re.match(r"^postid-(\d+)$", cls)
+            if m:
+                return m.group(1)
+    # 2. <link rel="shortlink" href="/?p=12345">
+    shortlink = soup.find("link", rel="shortlink")
+    if shortlink:
+        m = re.search(r"[?&]p=(\d+)", shortlink.get("href", ""))
+        if m:
+            return m.group(1)
+    # 3. 原始 HTML 中的 "post_id":12345 / "postid":12345
+    m = re.search(r'"post(?:id|_id)"\s*:\s*"?(\d+)"?', html)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _extract_js_str(html: str, key: str) -> Optional[str]:
+    """从页面内嵌 JS 中提取指定 key 的字符串/数字值。"""
+    for pattern in [
+        rf'"{re.escape(key)}"\s*:\s*"([^"]+)"',
+        rf"'{re.escape(key)}'\s*:\s*'([^']+)'",
+        rf'"{re.escape(key)}"\s*:\s*(\d+)',
+        rf"var\s+{re.escape(key)}\s*=\s*['\"]([^'\"]+)['\"]",
+    ]:
+        m = re.search(pattern, html)
+        if m:
+            return m.group(1)
+    return None
+
+
 def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> str:
     r = session_get(session, download_page_url)
     soup = BeautifulSoup(r.text, "lxml")
+    html = r.text
+    html_clean = html.replace("\\/", "/").replace("\\u002F", "/")
 
     # 1. <a href> 中的 download.php 链接（旧版页面结构）
     for a in soup.select('a[href*="download.php"]'):
@@ -348,22 +389,75 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
                 return urljoin(BASE_URL, val)
 
     # 4. 原始 HTML 全文正则扫描（覆盖 <script> 中的内嵌 URL）
-    #    APKMirror JS 代码里路径有时以 \/ 或 \u002F 转义
     m = re.search(
         r'(/wp-content/themes/APKMirror/download\.php[^"\'<>\s\\]+)',
-        r.text.replace("\\/", "/").replace("\\u002F", "/"),
+        html_clean,
     )
     if m:
         return urljoin(BASE_URL, m.group(1))
 
-    # 诊断：打出 #file div 的 HTML + 前20个链接，用于排查结构变更或 CF 拦截
+    # 5. 从 URL 中的 key= 参数 + 页面 WordPress Post ID 直接构造 download.php 链接
+    #    APKMirror 新版确认页完全 JS 渲染，但 WordPress body class 里有 postid-XXXX
+    key_m = re.search(r"[?&]key=([a-f0-9]+)", download_page_url)
+    if key_m:
+        dl_key = key_m.group(1)
+        forcebase = "&forcebaseapk=true" if "forcebaseapk" in download_page_url else ""
+        post_id = _extract_post_id(soup, html)
+        if post_id:
+            logger.debug("Step5 post_id=%s key=%s", post_id, dl_key)
+            dl_url = (
+                f"/wp-content/themes/APKMirror/download.php"
+                f"?id={post_id}&key={dl_key}{forcebase}"
+            )
+            return urljoin(BASE_URL, dl_url)
+
+    # 6. 从页面内嵌 JS 变量提取 nonce + id，调用 WordPress AJAX 端点
+    nonce = _extract_js_str(html, "nonce")
+    file_id = _extract_js_str(html, "id") or _extract_js_str(html, "file_id")
+    if nonce and file_id:
+        ajax_url = urljoin(BASE_URL, "/wp-admin/admin-ajax.php")
+        for action in ["apkm_generate_download_key_ajax", "get_download_key", "apkm_download_v2"]:
+            try:
+                resp = session.post(
+                    ajax_url,
+                    data={"action": action, "nonce": nonce, "id": file_id},
+                    timeout=15,
+                    headers={"Referer": download_page_url, "X-Requested-With": "XMLHttpRequest"},
+                )
+                if resp.ok:
+                    txt = resp.text.strip()
+                    if txt.startswith("{"):
+                        data = resp.json()
+                        url = (
+                            data.get("url") or data.get("download_url")
+                            or data.get("link")
+                            or (data.get("data") or {}).get("url")
+                        )
+                        if url:
+                            return url.replace("\\/", "/")
+            except Exception as e:
+                logger.debug("AJAX action=%s 失败：%s", action, e)
+
+    # 诊断日志：打出 post_id / nonce / file_id 以及含关键词的 script 标签内容
     title = soup.title.string if soup.title else "(no title)"
-    file_div = soup.find(id="file")
-    file_html = str(file_div)[:800] if file_div else "(#file div 不存在)"
+    post_id_diag = _extract_post_id(soup, html)
+    file_el = soup.find(id="file")
+    file_html = str(file_el)[:800] if file_el else "(#file 元素不存在)"
     all_hrefs = [a.get("href", "") for a in soup.select("a[href]")][:20]
+    script_snippets: list[str] = []
+    for tag in soup.select("script"):
+        c = tag.string or ""
+        if any(kw in c for kw in ("nonce", "download", "ajaxurl", "file_id", "wpdmdl", "postid")):
+            script_snippets.append(c[:400])
     logger.error(
-        "无法解析下载直链。页面标题：%r  URL：%s\n  #file div（前800字符）：%s\n  前20个链接：%s",
-        title, download_page_url, file_html, all_hrefs,
+        "无法解析下载直链。页面标题：%r  URL：%s\n"
+        "  post_id=%r  nonce=%r  file_id=%r\n"
+        "  #file 元素：%s\n"
+        "  含关键词 script 标签（前3个各400字符）：%s\n"
+        "  前20个链接：%s",
+        title, download_page_url,
+        post_id_diag, nonce, file_id,
+        file_html, script_snippets[:3], all_hrefs,
     )
     raise RuntimeError("无法在中间页解析出真实的 APK 直链，可能是页面结构变更或触发了反爬")
 
