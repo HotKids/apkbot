@@ -145,6 +145,11 @@ def _is_variant_link(href: str, release_url: str) -> bool:
         return False
     if not href.endswith("/") and not re.search(r"/[^/]+-\d+[^/]*/?$", href):
         return False
+    # 排除"汇总下载页"（URL 末段仅含短版本号，如 50-5-19）；
+    # 真实 variant 的 URL 含 build 码（6 位以上数字，如 pr-160218067）
+    last_segment = clean_href.split("/")[-1]
+    if not re.search(r"\d{6,}", last_segment):
+        return False
     return True
 
 
@@ -368,6 +373,31 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
     logger.info("下载完成：%s (%.2f MB, sha256=%s...)",
                 apk_path.name, apk_path.stat().st_size / 1024 / 1024, file_hash[:12])
     return apk_path, file_hash
+
+
+# ---------------------------------------------------------------------------
+# 包名 → APKMirror URL 解析
+# ---------------------------------------------------------------------------
+
+def resolve_package_to_apkmirror_url(session: requests.Session, package_name: str) -> Optional[str]:
+    """通过包名搜索 APKMirror，返回该应用的 base URL。"""
+    search_url = f"{BASE_URL}/?searchtype=app&s={package_name}"
+    r = session_get(session, search_url)
+    # 1. 直接重定向到应用主页
+    if re.match(r"^https?://(www\.)?apkmirror\.com/apk/[^/]+/[^/]+/?$", r.url):
+        return r.url
+    # 2. 搜索结果页中提取
+    soup = BeautifulSoup(r.text, "lxml")
+    for a in soup.select("a.fontBlack"):
+        href = a.get("href", "")
+        if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
+            return urljoin(BASE_URL, href)
+    # 3. 降级：全页搜索
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
+            return urljoin(BASE_URL, href)
+    return None
 
 
 # ---------------------------------------------------------------------------
