@@ -8,6 +8,12 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import requests
+try:
+    from curl_cffi import requests as _cffi_requests
+    _CURL_CFFI_AVAILABLE = True
+except ImportError:
+    _cffi_requests = None
+    _CURL_CFFI_AVAILABLE = False
 from bs4 import BeautifulSoup, Tag
 
 from config import (
@@ -45,15 +51,26 @@ _KNOWN_DPI = ["nodpi", "160dpi", "240dpi", "320dpi", "480dpi", "640dpi"]
 # HTTP 工具
 # ---------------------------------------------------------------------------
 
-def new_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(
-        {
+def new_session():
+    """创建 HTTP session。优先使用 curl_cffi（Chrome TLS 指纹，可绕过 Cloudflare），
+    不可用时降级为标准 requests.Session。"""
+    if _CURL_CFFI_AVAILABLE:
+        # impersonate="chrome120" 使用 Chrome 120 的完整 TLS/JA3/HTTP2 指纹
+        s = _cffi_requests.Session(impersonate="chrome120")
+        # curl_cffi 会自动设置 Chrome UA，只追加 Accept-Language/Referer
+        s.headers.update({
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": BASE_URL + "/",
+        })
+        logger.info("HTTP session: curl_cffi Chrome120 impersonation")
+    else:
+        s = requests.Session()
+        s.headers.update({
             "User-Agent": USER_AGENT,
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": BASE_URL + "/",
-        }
-    )
+        })
+        logger.warning("HTTP session: curl_cffi 不可用，降级为 requests（可能被 Cloudflare 拦截）")
     return s
 
 
@@ -475,9 +492,10 @@ def _fetch_apkm_download_action(
                 _download_action_cache[full_src] = action
                 logger.info("从 JS 文件找到 download action: %s  (src=%s)", action, full_src)
                 return action
-            logger.debug("JS 文件无 download action: %s", full_src)
+            logger.info("JS 文件无 download action（HTTP %d，%d bytes）: %s",
+                        r.status_code, len(js), full_src)
         except Exception as e:
-            logger.debug("获取 JS 文件失败 %s: %s", full_src, e)
+            logger.info("获取 JS 文件失败 %s: %s", full_src, e)
     return None
 
 
@@ -572,7 +590,9 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
                     timeout=15,
                     headers={
                         "Referer": download_page_url,
+                        "Origin": BASE_URL,
                         "X-Requested-With": "XMLHttpRequest",
+                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                     },
                 )
                 _txt = _resp.text.strip()
