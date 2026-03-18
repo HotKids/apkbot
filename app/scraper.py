@@ -436,6 +436,51 @@ def _extract_ajaxurl(html: str) -> str:
     return m.group(1) if m else "/wp-admin/admin-ajax.php"
 
 
+# 运行时缓存：JS 文件 URL → 找到的 AJAX action 名，避免重复拉取
+_download_action_cache: dict[str, str] = {}
+
+
+def _fetch_apkm_download_action(
+    session: requests.Session, page_html: str, referer: str
+) -> Optional[str]:
+    """从确认页加载的外部 APKMirror JS 文件中找到下载 AJAX action 名。
+    扫描所有 <script src> 中属于 apkmirror.com 的脚本，跳过 CDN 公共库。
+    结果缓存到进程内字典，热路径无需重复请求。"""
+    soup_js = BeautifulSoup(page_html, "lxml")
+    for tag in soup_js.select("script[src]"):
+        src = tag.get("src", "")
+        if not src or "apkmirror.com" not in src:
+            continue
+        # 跳过公共 CDN 库（jquery、lodash 等）
+        src_lower = src.lower()
+        if any(lib in src_lower for lib in ("jquery", "lodash", "bootstrap", "recaptcha")):
+            continue
+        full_src = urljoin(BASE_URL, src)
+        # 已缓存直接返回
+        if full_src in _download_action_cache:
+            logger.debug("JS action cache hit: %s → %s", full_src, _download_action_cache[full_src])
+            return _download_action_cache[full_src]
+        try:
+            r = session.get(full_src, timeout=10, headers={"Referer": referer})
+            js = r.text
+            # 搜索形如 action:"generate_download_key_ajax" 或 action='apkm_download' 的片段
+            # 要求 action 值含有 download / generate / key 关键字之一
+            m = re.search(
+                r'action\s*[=:]\s*["\']([a-zA-Z_][a-zA-Z0-9_]*(?:download|generate|key)[a-zA-Z0-9_]*)["\']',
+                js,
+                re.IGNORECASE,
+            )
+            if m:
+                action = m.group(1)
+                _download_action_cache[full_src] = action
+                logger.info("从 JS 文件找到 download action: %s  (src=%s)", action, full_src)
+                return action
+            logger.debug("JS 文件无 download action: %s", full_src)
+        except Exception as e:
+            logger.debug("获取 JS 文件失败 %s: %s", full_src, e)
+    return None
+
+
 def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> str:
     r = session_get(session, download_page_url)
     soup = BeautifulSoup(r.text, "lxml")
@@ -487,27 +532,30 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
                 return resolved
 
     # 6. WordPress AJAX 解锁下载
-    #    确认页 JS 会在倒计时后向 ajaxurl 发送解锁请求，我们在此复现该调用。
-    #    ajaxurl 从页面提取（APKMirror 用 /wordpress/wp-admin/admin-ajax.php 而非 /wp-admin/）
+    #    APKMirror 新版确认页由 JS 控制：倒计时结束后 JS 向 ajaxurl 发送解锁请求并拿到真实 URL。
+    #    我们在此复现该调用：先从外部 JS 文件提取正确的 action 名，再 fallback 到已知列表。
     _key_m = re.search(r"[?&]key=([a-f0-9]+)", download_page_url)
     _post_id = _extract_post_id(soup, html)
     if _key_m and _post_id:
         _dl_key = _key_m.group(1)
         _forcebase = "true" if "forcebaseapk" in download_page_url else "false"
-        _ajax_base = _extract_ajaxurl(html)          # e.g. /wordpress/wp-admin/admin-ajax.php
+        _ajax_base = _extract_ajaxurl(html)   # 页面里的 /wordpress/wp-admin/admin-ajax.php
         _ajax_full = urljoin(BASE_URL, _ajax_base)
-        _nonce = _extract_wp_nonce(html)             # 可能是 None，也尝试无 nonce 调用
-        logger.debug(
-            "Step6 ajaxurl=%s post_id=%s key=%s nonce=%s",
-            _ajax_full, _post_id, _dl_key, _nonce,
-        )
-        for _action in [
+        _nonce = _extract_wp_nonce(html)      # 可能是 None，无 nonce 也尝试
+        # 先从外部 JS 文件找 action；找不到再 fallback 到猜测列表
+        _js_action = _fetch_apkm_download_action(session, html, download_page_url)
+        _actions = ([_js_action] if _js_action else []) + [
             "apkm_generate_download_key_ajax",
             "generate_download_key_ajax",
             "get_download_key",
             "apkm_download_v2",
             "apkm_download",
-        ]:
+        ]
+        logger.info(
+            "Step6 ajaxurl=%s post_id=%s key=%s nonce=%s actions=%s",
+            _ajax_full, _post_id, _dl_key, _nonce, _actions,
+        )
+        for _action in _actions:
             _data: dict = {
                 "action": _action,
                 "id": _post_id,
@@ -528,10 +576,8 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
                     },
                 )
                 _txt = _resp.text.strip()
-                logger.debug(
-                    "AJAX action=%s → HTTP %d: %s",
-                    _action, _resp.status_code, _txt[:300],
-                )
+                # INFO 级别，生产日志可见（之前是 DEBUG，无法看到）
+                logger.info("AJAX %s → HTTP %d: %s", _action, _resp.status_code, _txt[:300])
                 if _resp.ok and _txt.startswith("{"):
                     _d = _resp.json()
                     _url = (
@@ -542,28 +588,35 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
                     if _url:
                         return _url.replace("\\/", "/")
             except Exception as _e:
-                logger.debug("AJAX action=%s 异常：%s", _action, _e)
+                logger.debug("AJAX %s 异常：%s", _action, _e)
 
-    # 诊断日志：打出 post_id / nonce / file_id 以及含关键词的 script 标签内容
+    # 诊断日志：尽可能多地打出页面信息供分析
     title = soup.title.string if soup.title else "(no title)"
     post_id_diag = _extract_post_id(soup, html)
+    nonce_diag = _extract_wp_nonce(html)
+    ajaxurl_diag = _extract_ajaxurl(html)
     file_el = soup.find(id="file")
     file_html = str(file_el)[:800] if file_el else "(#file 元素不存在)"
     all_hrefs = [a.get("href", "") for a in soup.select("a[href]")][:20]
-    script_snippets: list[str] = []
-    for tag in soup.select("script"):
-        c = tag.string or ""
-        if any(kw in c for kw in ("nonce", "download", "ajaxurl", "file_id", "wpdmdl", "postid")):
-            script_snippets.append(c[:400])
+    # 所有内联 script 标签的完整内容（不过滤关键词，1000 chars each）
+    script_snippets: list[str] = [
+        (tag.string or "")[:1000] for tag in soup.select("script") if tag.string
+    ]
+    # 外部 APKMirror JS 文件列表（用于确认 _fetch_apkm_download_action 搜索范围）
+    ext_scripts = [
+        t.get("src", "") for t in soup.select("script[src]")
+        if "apkmirror.com" in t.get("src", "")
+    ]
     logger.error(
         "无法解析下载直链。页面标题：%r  URL：%s\n"
-        "  post_id=%r  nonce=%r  file_id=%r\n"
+        "  post_id=%r  nonce=%r  ajaxurl=%r\n"
         "  #file 元素：%s\n"
-        "  含关键词 script 标签（前3个各400字符）：%s\n"
+        "  外部 APKMirror JS 文件：%s\n"
+        "  全部内联 script（前5个各1000字符）：%s\n"
         "  前20个链接：%s",
         title, download_page_url,
-        post_id_diag, nonce, file_id,
-        file_html, script_snippets[:3], all_hrefs,
+        post_id_diag, nonce_diag, ajaxurl_diag,
+        file_html, ext_scripts, script_snippets[:5], all_hrefs,
     )
     raise RuntimeError("无法在中间页解析出真实的 APK 直链，可能是页面结构变更或触发了反爬")
 
