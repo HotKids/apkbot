@@ -135,20 +135,23 @@ def _extract_release_version(release_url: str) -> str:
 
 
 def _is_variant_link(href: str, release_url: str) -> bool:
-    """判断链接是否为 release 页下的某个 variant（子页面）。"""
+    """判断链接是否为 release 页下的某个 variant（子页面）。
+
+    规则：href 必须比 release_url 恰好深一层路径，且包含 release 路径片段。
+    用路径深度代替"6 位数字"启发式，以兼容无大版本号的 app（如微信）。
+    """
     base = release_url.rstrip("/")
     clean_href = href.rstrip("/")
     if clean_href == base:
         return False
-    # variant 页 href 通常包含 release 路径片段，且有更深的路径
+    # 必须包含 release 路径片段（排除无关链接）
     if base.split("/apk/", 1)[-1].rstrip("/") not in href:
         return False
-    if not href.endswith("/") and not re.search(r"/[^/]+-\d+[^/]*/?$", href):
-        return False
-    # 排除"汇总下载页"（URL 末段仅含短版本号，如 50-5-19）；
-    # 真实 variant 的 URL 含 build 码（6 位以上数字，如 pr-160218067）
-    last_segment = clean_href.split("/")[-1]
-    if not re.search(r"\d{6,}", last_segment):
+    # 必须恰好比 release 页深一层（排除 /download/、/variant/download/ 等子页面）
+    base_path = "/" + base.split("://")[-1].split("/", 1)[-1]
+    suffix = clean_href[len(base_path):]
+    inner = suffix.lstrip("/")
+    if not inner or "/" in inner:
         return False
     return True
 
