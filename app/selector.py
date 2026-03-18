@@ -282,13 +282,18 @@ def select_best_variant(
         return None
 
     # 步骤 2：打分排序
-    def sort_key(item: tuple[int, Variant]) -> tuple[float, int, int, int]:
+    def sort_key(item: tuple[int, Variant]) -> tuple:
         idx, v = item
+        url = v.variant_url or ""
         return (
             score_variant(v, config),     # 主排名：分数越高越好
+            # 同分时优先选"传统"variant 页（不含 android-apk-download）
+            # 传统页的下载确认页有静态 HTML 链接；新式页面由 JS 渲染，
+            # 对两者都能处理，但有静态链接的更可靠
+            0 if "android-apk-download" in url else 1,
             1 if v.version_code is not None else 0,  # 有 version_code 优先
             v.version_code if v.version_code is not None else -1,
-            1 if v.variant_url else 0,    # 有 URL 优先
+            1 if url else 0,              # 有 URL 优先
             -idx,                         # 原列表靠前优先（负值使小 idx 更大）
         )
 
