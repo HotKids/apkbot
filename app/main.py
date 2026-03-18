@@ -4,7 +4,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 import config  # 最先 import：触发必填项校验 + 目录创建
-from database import init_db
+from database import get_apk_url, init_db
 from handlers import bot, run_check
 
 logging.basicConfig(
@@ -31,7 +31,7 @@ def main() -> None:
     scheduler.start()
     logger.info(
         "Bot started. Target: %s | Cron: %s (%s)",
-        config.APK_URL, config.CRON_SCHEDULE, config.TZ,
+        get_apk_url() or "未配置", config.CRON_SCHEDULE, config.TZ,
     )
     bot.infinity_polling(timeout=30, long_polling_timeout=30)
 

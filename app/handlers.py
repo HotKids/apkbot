@@ -1,3 +1,4 @@
+import html
 import logging
 import threading
 from datetime import datetime, timezone
@@ -18,7 +19,6 @@ from database import (
     get_apk_url,
     get_state,
     is_already_pushed,
-    save_download,
     set_setting,
     update_state,
 )
@@ -72,14 +72,26 @@ def _caption_text(variant: Variant, apk_path: Path, sha256: str) -> str:
     )
 
 
+_TG_MAX_FILE_BYTES = 50 * 1024 * 1024  # Telegram Bot API 文件上传限制
+
+
 def _push_to_channel(variant: Variant, apk_path: Path, sha256: str) -> None:
-    """向 TARGET_CHAT_ID 发送文件，失败则抛出异常。"""
+    """向 TARGET_CHAT_ID 发送文件；超过 50MB 则改发文字消息 + 下载链接。"""
+    caption = _caption_text(variant, apk_path, sha256)
+    if apk_path.stat().st_size > _TG_MAX_FILE_BYTES:
+        size_mb = apk_path.stat().st_size / 1024 / 1024
+        bot.send_message(
+            TARGET_CHAT_ID,
+            caption + f"\n\n⚠️ 文件大小 {size_mb:.0f} MB，超过 Telegram 50 MB 限制，无法直接发送。\n"
+            f"请前往 APKMirror 手动下载：\n{variant.variant_url}",
+        )
+        return
     with apk_path.open("rb") as f:
         bot.send_document(
             TARGET_CHAT_ID,
             f,
             visible_file_name=apk_path.name,
-            caption=_caption_text(variant, apk_path, sha256),
+            caption=caption,
             timeout=300,
         )
 
@@ -111,11 +123,11 @@ def run_check(triggered_by: Optional[int] = None) -> str:
                     logger.exception("发送消息给 owner 失败")
             return msg
 
-        _push_to_channel(variant, apk_path, sha256)
-        save_download(
-            apk_path.name, str(apk_path),
-            apk_path.stat().st_size, sha256, variant.variant_url,
-        )
+        try:
+            _push_to_channel(variant, apk_path, sha256)
+        except Exception:
+            apk_path.unlink(missing_ok=True)
+            raise
         update_state(
             last_release_url=variant.release_url,
             last_variant_url=variant.variant_url,
@@ -145,7 +157,7 @@ def run_check(triggered_by: Optional[int] = None) -> str:
             update_state(last_checked_at=_now_iso(), last_status="failed", last_error=err)
         except Exception:
             pass
-        msg = f"检查失败：{err}"
+        msg = f"检查失败：{html.escape(err)}"
         if triggered_by:
             try:
                 bot.send_message(triggered_by, msg)
@@ -179,7 +191,7 @@ def handle_status(message: Message):
         f"上次推送：<code>{state['last_pushed_at'] or '—'}</code>\n"
         f"最新版本：<code>{state['last_version_name'] or '—'}</code>\n"
         f"状态：<code>{state['last_status'] or '—'}</code>\n"
-        f"错误：<code>{state['last_error'] or '无'}</code>",
+        f"错误：<code>{html.escape(state['last_error'] or '无')}</code>",
     )
 
 

@@ -47,15 +47,6 @@ def init_db() -> None:
                 last_error          TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS downloads (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_name   TEXT NOT NULL,
-                file_path   TEXT NOT NULL,
-                size_bytes  INTEGER,
-                sha256      TEXT,
-                source_url  TEXT,
-                created_at  TEXT NOT NULL
-            );
             """
         )
 
@@ -100,20 +91,6 @@ def update_state(**kwargs) -> None:
     with db_lock, db_conn() as conn:
         conn.execute(sql, list(kwargs.values()))
 
-
-def save_download(
-    file_name: str,
-    file_path: str,
-    size_bytes: int,
-    sha256: str,
-    source_url: str,
-) -> None:
-    with db_lock, db_conn() as conn:
-        conn.execute(
-            "INSERT INTO downloads(file_name, file_path, size_bytes, sha256, source_url, created_at) "
-            "VALUES(?, ?, ?, ?, ?, ?)",
-            (file_name, file_path, size_bytes, sha256, source_url, _now_iso()),
-        )
 
 
 def is_already_pushed(
