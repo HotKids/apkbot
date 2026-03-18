@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -10,27 +11,14 @@ import requests
 from bs4 import BeautifulSoup, Tag
 
 from config import (
-    ALLOW_BUNDLE,
     BASE_URL,
     DELETE_AFTER_PUSH,
     DOWNLOAD_DIR,
-    EXCLUDE_KEYWORDS,
-    MATCH_KEYWORDS,
     MAX_KEEP_FILES,
-    MIN_ANDROID_CEILING,
-    MIN_ANDROID_FLOOR,
-    PREFER_APK,
-    PREFER_LOWER_ANDROID,
-    PREFER_MULTI_SIGNATURE,
-    PREFER_UNIVERSAL,
     REQUEST_TIMEOUT,
-    REQUIRED_ARCHITECTURES,
-    REQUIRED_DEVICE_TYPE,
-    REQUIRED_DPI,
-    REQUIRED_SIGNATURES,
     USER_AGENT,
 )
-from selector import SelectorConfig, Variant, select_best_variant
+from selector import Variant, config_from_env, select_best_variant
 
 logger = logging.getLogger("apkmirror-bot")
 
@@ -273,25 +261,6 @@ def parse_variants(session: requests.Session, release_url: str) -> list[Variant]
 # 过滤 & 打分 & 选择（委托给 selector 模块）
 # ---------------------------------------------------------------------------
 
-def _build_selector_config() -> SelectorConfig:
-    """从当前 config 模块的常量构造 SelectorConfig。"""
-    return SelectorConfig(
-        prefer_apk=PREFER_APK,
-        allow_bundle=ALLOW_BUNDLE,
-        required_signatures=REQUIRED_SIGNATURES,
-        required_architectures=REQUIRED_ARCHITECTURES,
-        required_dpi=REQUIRED_DPI or None,
-        required_device_type=REQUIRED_DEVICE_TYPE or None,
-        min_android_floor=MIN_ANDROID_FLOOR,
-        min_android_ceiling=MIN_ANDROID_CEILING,
-        match_keywords=MATCH_KEYWORDS,
-        exclude_keywords=EXCLUDE_KEYWORDS,
-        prefer_universal=PREFER_UNIVERSAL,
-        prefer_lower_android=PREFER_LOWER_ANDROID,
-        prefer_multi_signature=PREFER_MULTI_SIGNATURE,
-    )
-
-
 def scrape_and_pick(session: requests.Session, apk_url: str) -> Variant:
     """完整抓取 + 过滤 + 打分，返回最佳 Variant（未下载）。"""
     release_url = get_release_url(session, apk_url)
@@ -301,7 +270,7 @@ def scrape_and_pick(session: requests.Session, apk_url: str) -> Variant:
     if not all_variants:
         raise RuntimeError("Release 页未找到任何 variant")
 
-    cfg = _build_selector_config()
+    cfg = config_from_env(os.environ)
     best = select_best_variant(all_variants, cfg)
     if best is None:
         raise RuntimeError(

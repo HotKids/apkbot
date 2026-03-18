@@ -1,7 +1,7 @@
 import logging
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 import config  # 最先 import：触发必填项校验 + 目录创建
 from database import init_db
@@ -24,12 +24,12 @@ def main() -> None:
     scheduler = BackgroundScheduler(timezone=config.TZ)
     scheduler.add_job(
         scheduled_job,
-        CronTrigger.from_crontab(config.CRON_SCHEDULE, timezone=config.TZ),
+        IntervalTrigger(minutes=config.CHECK_INTERVAL, timezone=config.TZ),
         id="apk_check",
         replace_existing=True,
     )
     scheduler.start()
-    logger.info("Bot started. Cron: %s (%s)", config.CRON_SCHEDULE, config.TZ)
+    logger.info("Bot started. Check interval: %dm (%s)", config.CHECK_INTERVAL, config.TZ)
     bot.infinity_polling(timeout=30, long_polling_timeout=30)
 
 

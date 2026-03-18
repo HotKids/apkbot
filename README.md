@@ -36,19 +36,17 @@ cp .env.example .env
 nano .env
 ```
 
-必填项（共 3 个）：
+必填项（共 2 个）：
 
 ```env
 BOT_TOKEN=123456:ABCDEF
 OWNER_ID=123456789
-CRON_SCHEDULE=0 9 * * *
 ```
 
 | 变量 | 说明 |
 |------|------|
 | `BOT_TOKEN` | BotFather 给的 token |
 | `OWNER_ID` | 你的 Telegram user_id（整数） |
-| `CRON_SCHEDULE` | 定时表达式（标准 5 字段，如 `0 9 * * *` = 每天 09:00） |
 
 ### 3. 启动
 
@@ -65,7 +63,7 @@ docker compose logs -f
 看到以下输出说明启动成功：
 
 ```
-Bot started. Cron: 0 9 * * * (Asia/Shanghai)
+Bot started. Check interval: 60m (Asia/Shanghai)
 ```
 
 ---
