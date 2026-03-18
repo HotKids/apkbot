@@ -1,8 +1,8 @@
 import hashlib
 import logging
+import os
 import re
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
@@ -11,22 +11,12 @@ import requests
 from bs4 import BeautifulSoup, Tag
 
 from config import (
-    ALLOW_BUNDLE,
     BASE_URL,
-    DELETE_AFTER_PUSH,
     DOWNLOAD_DIR,
-    EXCLUDE_KEYWORDS,
-    MATCH_KEYWORDS,
-    MAX_KEEP_FILES,
-    MIN_ANDROID_CEILING,
-    MIN_ANDROID_FLOOR,
     REQUEST_TIMEOUT,
-    REQUIRED_ARCHITECTURES,
-    REQUIRED_DEVICE_TYPE,
-    REQUIRED_DPI,
-    REQUIRED_SIGNATURES,
     USER_AGENT,
 )
+from selector import Variant, config_from_env, select_best_variant
 
 logger = logging.getLogger("apkmirror-bot")
 
@@ -42,30 +32,7 @@ _ANDROID_API_MAP: dict[int, int] = {
 _KNOWN_ARCHITECTURES = ["arm64-v8a", "armeabi-v7a", "x86_64", "x86", "universal"]
 _KNOWN_DPI = ["nodpi", "160dpi", "240dpi", "320dpi", "480dpi", "640dpi"]
 
-
-# ---------------------------------------------------------------------------
-# Variant 数据类
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Variant:
-    app_name: str
-    release_version_name: str
-    version_code: Optional[int]
-    variant_label: str
-    type: str                       # "APK" | "BUNDLE"
-    is_bundle: bool
-    signatures: list[str]           # 从 raw_text 提取的 4 位 hex 串
-    architectures: list[str]
-    min_android_text: Optional[str]
-    min_android_api: Optional[int]
-    dpi: Optional[str]
-    device_type: Optional[str]
-    release_url: str
-    variant_url: str
-    download_page_url: Optional[str] = None
-    final_download_url: Optional[str] = None
-    raw_text: str = ""
+# Variant 数据类由 selector 模块提供（避免重复定义）
 
 
 # ---------------------------------------------------------------------------
@@ -289,72 +256,8 @@ def parse_variants(session: requests.Session, release_url: str) -> list[Variant]
 
 
 # ---------------------------------------------------------------------------
-# 过滤 & 打分
+# 过滤 & 打分 & 选择（委托给 selector 模块）
 # ---------------------------------------------------------------------------
-
-def filter_variants(variants: list[Variant]) -> list[Variant]:
-    result = []
-    for v in variants:
-        # 1. 类型过滤（PREFER_APK 仅影响打分，不强制排除）
-        if v.is_bundle and not ALLOW_BUNDLE:
-            continue
-        # 2. 签名过滤（AND：必须全部命中）
-        if REQUIRED_SIGNATURES:
-            if not all(sig in v.signatures for sig in REQUIRED_SIGNATURES):
-                continue
-        # 3. 架构过滤（OR：至少命中一个）
-        if REQUIRED_ARCHITECTURES:
-            if not any(a in v.architectures for a in REQUIRED_ARCHITECTURES):
-                continue
-        # 4. DPI 过滤
-        if REQUIRED_DPI and v.dpi != REQUIRED_DPI:
-            continue
-        # 5. 设备类型过滤
-        if REQUIRED_DEVICE_TYPE and v.device_type != REQUIRED_DEVICE_TYPE:
-            continue
-        # 6. Android 版本范围过滤
-        if MIN_ANDROID_FLOOR is not None and v.min_android_api is not None:
-            if v.min_android_api < MIN_ANDROID_FLOOR:
-                continue
-        if MIN_ANDROID_CEILING is not None and v.min_android_api is not None:
-            if v.min_android_api > MIN_ANDROID_CEILING:
-                continue
-        # 7. 排除关键词
-        if EXCLUDE_KEYWORDS:
-            if any(kw.lower() in v.raw_text.lower() for kw in EXCLUDE_KEYWORDS):
-                continue
-        # 8. 必需关键词（OR：至少命中一个）
-        if MATCH_KEYWORDS:
-            if not any(kw.lower() in v.raw_text.lower() for kw in MATCH_KEYWORDS):
-                continue
-        result.append(v)
-    return result
-
-
-def score_variant(v: Variant) -> float:
-    s = 0.0
-    if v.type == "APK":
-        s += 100
-    if len(v.signatures) > 1:
-        s += 20
-    if "arm64-v8a" in v.architectures:
-        s += 30
-    elif "armeabi-v7a" in v.architectures:
-        s += 20
-    elif "x86_64" in v.architectures:
-        s += 10
-    elif "x86" in v.architectures:
-        s += 5
-    if v.device_type == "universal":
-        s += 15
-    if v.dpi == "nodpi":
-        s += 10
-    if v.min_android_api is not None:
-        s += max(0, 30 - v.min_android_api)
-    if v.version_code is not None:
-        s += v.version_code / 1_000_000
-    return s
-
 
 def scrape_and_pick(session: requests.Session, apk_url: str) -> Variant:
     """完整抓取 + 过滤 + 打分，返回最佳 Variant（未下载）。"""
@@ -364,20 +267,19 @@ def scrape_and_pick(session: requests.Session, apk_url: str) -> Variant:
     logger.info("共解析 %d 个 variant", len(all_variants))
     if not all_variants:
         raise RuntimeError("Release 页未找到任何 variant")
-    candidates = filter_variants(all_variants)
-    logger.info("过滤后剩余 %d 个候选 variant", len(candidates))
-    if not candidates:
+
+    cfg = config_from_env(os.environ)
+    best = select_best_variant(all_variants, cfg)
+    if best is None:
         raise RuntimeError(
             f"没有 variant 通过过滤条件（共 {len(all_variants)} 个）。"
             "请检查 REQUIRED_SIGNATURES / REQUIRED_ARCHITECTURES 等配置。"
         )
-    candidates.sort(key=score_variant, reverse=True)
-    best = candidates[0]
     logger.info(
-        "选中：%s | %s | %s | api=%s | dpi=%s | score=%.2f",
+        "选中：%s | %s | %s | api=%s | dpi=%s",
         best.variant_label, best.type,
         best.architectures, best.min_android_api,
-        best.dpi, score_variant(best),
+        best.dpi,
     )
     return best
 
@@ -457,25 +359,9 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
 # ---------------------------------------------------------------------------
 
 def cleanup_after_push(apk_path: Path) -> None:
-    """推送成功后按配置清理 APK 文件。"""
-    if DELETE_AFTER_PUSH:
-        try:
-            apk_path.unlink(missing_ok=True)
-            logger.info("已删除推送后的 APK：%s", apk_path.name)
-        except OSError:
-            logger.exception("删除 APK 失败：%s", apk_path)
-        return
-    if MAX_KEEP_FILES > 0:
-        _trim_download_dir(MAX_KEEP_FILES)
-
-
-def _trim_download_dir(keep: int) -> None:
-    """按修改时间排序，保留最新 keep 个 .apk，删除旧文件。"""
-    apks = sorted(DOWNLOAD_DIR.glob("*.apk"), key=lambda p: p.stat().st_mtime)
-    to_delete = apks[:-keep] if len(apks) > keep else []
-    for path in to_delete:
-        try:
-            path.unlink()
-            logger.info("已删除旧 APK：%s", path.name)
-        except OSError:
-            logger.exception("删除旧 APK 失败：%s", path)
+    """推送成功后删除 APK 文件。"""
+    try:
+        apk_path.unlink(missing_ok=True)
+        logger.info("已删除 APK：%s", apk_path.name)
+    except OSError:
+        logger.exception("删除 APK 失败：%s", apk_path)
