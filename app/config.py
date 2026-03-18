@@ -27,7 +27,6 @@ OWNER_ID: int = int(_owner_raw) if _owner_raw else 0
 _chat_raw = os.getenv("TARGET_CHAT_ID", "").strip()
 TARGET_CHAT_ID: int = int(_chat_raw) if _chat_raw else 0
 CRON_SCHEDULE: str = os.getenv("CRON_SCHEDULE", "").strip()
-APK_URL: str = os.getenv("APK_URL", "").strip()
 
 # ---------- 可选：基础 ----------
 TZ: str = os.getenv("TZ", "Asia/Shanghai")
@@ -64,8 +63,6 @@ if not TARGET_CHAT_ID:
     _missing.append("TARGET_CHAT_ID")
 if not CRON_SCHEDULE:
     _missing.append("CRON_SCHEDULE")
-if not APK_URL:
-    _missing.append("APK_URL")
 if _missing:
     raise RuntimeError(f"缺少必填环境变量：{', '.join(_missing)}")
 
