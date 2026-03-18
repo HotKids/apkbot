@@ -386,12 +386,16 @@ def _follow_html_redirect(
             href = a.get("href", "")
             if re.search(r"\.(apk|apkm|xapk)(\?|$)", href, re.I):
                 return urljoin(BASE_URL, href)
-        # 4. 任意含 .apk 的 https:// 链接
-        m = re.search(r'(https?://[^\s"\'<>]+\.apk(?:\?[^\s"\'<>]*)?)', h)
+        # 4. 任意以 .apk/.apkm/.xapk 结尾（后跟 ? 或非字母）的 https:// 链接
+        #    注意：必须加断言排除 apkmirror.com 这类域名中的 ".apk"
+        m = re.search(
+            r'(https?://[^\s"\'<>]+\.(?:apk|apkm|xapk)(?:\?[^\s"\'<>]*)?)(?=["\'\s<>]|$)',
+            h,
+        )
         if m:
             return m.group(1)
-        # 找不到：打出前 1500 字符供分析
-        logger.debug("download.php 返回 HTML，前1500字符：%s", h[:1500])
+        # 找不到：打出前 2000 字符供分析（ERROR 级别，生产日志可见）
+        logger.error("download.php 返回 HTML，无法提取文件链接，前2000字符：\n%s", h[:2000])
     except Exception as e:
         logger.debug("_follow_html_redirect %s 失败：%s", url, e)
     return None
