@@ -183,7 +183,7 @@ def handle_status(message: Message):
     )
 
 
-@bot.message_handler(commands=["checknow"])
+@bot.message_handler(commands=["check"])
 def handle_checknow(message: Message):
     if not _require_private_owner(message):
         return
@@ -193,6 +193,25 @@ def handle_checknow(message: Message):
         kwargs={"triggered_by": message.chat.id},
         daemon=True,
     ).start()
+
+
+@bot.message_handler(commands=["unsub"])
+def handle_unsub(message: Message):
+    if not _require_private_owner(message):
+        return
+    set_setting("apk_url", "")
+    bot.reply_to(message, "已取消订阅，监控地址已清除。")
+
+
+@bot.message_handler(commands=["sublist"])
+def handle_sublist(message: Message):
+    if not _require_private_owner(message):
+        return
+    url = get_apk_url()
+    if not url:
+        bot.reply_to(message, "当前无订阅。使用 /sub &lt;url&gt; 设置监控地址。")
+    else:
+        bot.reply_to(message, f"当前订阅：\n<code>{url}</code>")
 
 
 @bot.message_handler(commands=["sub"])
