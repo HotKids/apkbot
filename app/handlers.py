@@ -129,7 +129,7 @@ def _send_current_version(chat_id: int, apk_url: str) -> None:
             )
     except Exception as e:
         logger.exception("首次推送失败：chat_id=%s url=%s", chat_id, apk_url)
-        _safe_send(chat_id, f"获取失败：{html.escape(str(e))}")
+        _safe_send(chat_id, f"❌ 获取失败：{html.escape(str(e))}")
     finally:
         if apk_path is not None:
             cleanup_after_push(apk_path)
@@ -145,7 +145,7 @@ def _check_single_url(apk_url: str) -> str:
 
         if not is_new_version(apk_url, variant.variant_url, variant.version_code, sha256, variant.type):
             update_apk_version(apk_url, last_checked_at=_now_iso())
-            return f"无更新：{html.escape(apk_url.rstrip('/').split('/')[-1])} ({html.escape(variant.release_version_name)})"
+            return f"无更新：{html.escape(apk_url.rstrip('/').split('/')[-1])}（{html.escape(variant.release_version_name)}）"
 
         subscribers = get_subscribers(apk_url)
         ok = 0
@@ -169,12 +169,13 @@ def _check_single_url(apk_url: str) -> str:
         )
         app_label = html.escape(apk_url.rstrip("/").split("/")[-1])
         return (
-            f"新版本 {html.escape(variant.release_version_name)}（{app_label}）"
-            f"：已推送 {ok}/{len(subscribers)}"
+            f"✅ {app_label} 有新版本 {html.escape(variant.release_version_name)}"
+            f"，已推送 {ok}/{len(subscribers)} 人"
         )
     except Exception as e:
         logger.exception("检查失败：%s", apk_url)
-        return f"检查失败 {html.escape(apk_url)}：{html.escape(str(e))}"
+        app_label = html.escape(apk_url.rstrip("/").split("/")[-1])
+        return f"❌ 检查失败 {app_label}：{html.escape(str(e))}"
     finally:
         if apk_path is not None:
             cleanup_after_push(apk_path)
@@ -184,7 +185,7 @@ def run_check_all(triggered_by: Optional[int] = None) -> None:
     """定时任务 / /check 手动触发：检查所有订阅 URL。"""
     if not check_lock.acquire(blocking=False):
         if triggered_by:
-            _safe_send(triggered_by, "已有检查任务在运行中。")
+            _safe_send(triggered_by, "⚠️ 已有检查任务在运行中。")
         return
     try:
         urls = get_all_subscribed_urls()
@@ -215,7 +216,9 @@ def handle_sub(message: Message):
             message,
             "用法：/sub &lt;链接或包名&gt;\n\n支持以下格式：\n"
             "1. <b>APKMirror 链接</b>\n"
+            "   <code>https://www.apkmirror.com/apk/…</code>\n"
             "2. <b>Google Play 链接</b>\n"
+            "   <code>https://play.google.com/store/apps/details?id=…</code>\n"
             "3. <b>应用包名</b>（如 <code>com.android.chrome</code>）",
         )
         return
@@ -235,33 +238,33 @@ def handle_sub(message: Message):
             package_name = input_str
 
         if package_name:
-            status_msg = bot.reply_to(message, f"正在通过包名 <code>{html.escape(package_name)}</code> 搜索 APKMirror…")
+            status_msg = bot.reply_to(message, f"🔄 正在通过包名 <code>{html.escape(package_name)}</code> 搜索 APKMirror……")
             try:
                 session = new_session()
                 mapped_url = resolve_package_to_apkmirror_url(session, package_name)
                 if not mapped_url:
                     bot.edit_message_text(
-                        f"未能在 APKMirror 找到包名 <code>{html.escape(package_name)}</code> 对应的应用。",
+                        f"❌ 未能在 APKMirror 找到包名 <code>{html.escape(package_name)}</code> 对应的应用。",
                         message.chat.id, status_msg.message_id,
                         parse_mode="HTML",
                     )
                     return
                 url = mapped_url
                 bot.edit_message_text(
-                    f"解析成功：\n<code>{html.escape(url)}</code>",
+                    f"✅ 解析成功：\n<code>{html.escape(url)}</code>",
                     message.chat.id, status_msg.message_id,
                     parse_mode="HTML",
                 )
             except Exception as e:
                 logger.exception("解析包名失败")
                 bot.edit_message_text(
-                    f"解析包名时发生错误：{html.escape(str(e))}",
+                    f"❌ 解析包名时发生错误：{html.escape(str(e))}",
                     message.chat.id, status_msg.message_id,
                     parse_mode="HTML",
                 )
                 return
         else:
-            bot.reply_to(message, "无法识别的输入格式。请提供 APKMirror 链接、Google Play 链接或应用包名。")
+            bot.reply_to(message, "❌ 无法识别的输入格式。请提供 APKMirror 链接、Google Play 链接或应用包名。")
             return
 
     # URL 标准化：去除查询参数，统一加尾斜杠
@@ -272,7 +275,7 @@ def handle_sub(message: Message):
         bot.reply_to(message, "🔄 已订阅该应用。正在为您手动抓取当前最新版本，请稍等……")
         threading.Thread(target=_send_current_version, args=(message.chat.id, url), daemon=True).start()
         return
-    bot.reply_to(message, f"订阅成功！正在获取当前最新版本，请稍等……\n<code>{html.escape(url)}</code>")
+    bot.reply_to(message, f"✅ 订阅成功！正在获取当前最新版本，请稍等……\n<code>{html.escape(url)}</code>")
     threading.Thread(
         target=_send_current_version,
         args=(message.chat.id, url),
@@ -302,13 +305,13 @@ def handle_unsub(message: Message):
     arg = parts[1].strip()
     if arg == "all":
         count = remove_all_subscriptions(message.chat.id)
-        bot.reply_to(message, f"已取消全部 {count} 个订阅。")
+        bot.reply_to(message, f"✅ 已取消全部 {count} 个订阅。")
     else:
         removed = remove_subscription(message.chat.id, arg)
         if removed:
-            bot.reply_to(message, "已取消订阅。")
+            bot.reply_to(message, "✅ 已取消订阅。")
         else:
-            bot.reply_to(message, "未找到该订阅，请检查 URL 是否正确。")
+            bot.reply_to(message, "❌ 未找到该订阅，请检查 URL 是否正确。")
 
 
 @bot.message_handler(commands=["sublist"])
@@ -327,7 +330,7 @@ def handle_sublist(message: Message):
 def handle_check(message: Message):
     if not _require_owner(message):
         return
-    bot.reply_to(message, "开始检查所有订阅，请稍等。")
+    bot.reply_to(message, "🔄 开始检查所有订阅，请稍等……")
     threading.Thread(
         target=run_check_all,
         kwargs={"triggered_by": message.chat.id},
@@ -357,14 +360,14 @@ def handle_adduser(message: Message):
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip().lstrip("-").isdigit():
-        bot.reply_to(message, "用法：/adduser <user_id>")
+        bot.reply_to(message, "用法：/adduser &lt;user_id&gt;")
         return
     uid = int(parts[1].strip())
     added = add_to_whitelist(uid)
     if added:
-        bot.reply_to(message, f"已添加用户 <code>{uid}</code> 到白名单。")
+        bot.reply_to(message, f"✅ 已添加用户 <code>{uid}</code> 到白名单。")
     else:
-        bot.reply_to(message, f"用户 <code>{uid}</code> 已在白名单中。")
+        bot.reply_to(message, f"⚠️ 用户 <code>{uid}</code> 已在白名单中。")
 
 
 @bot.message_handler(commands=["deluser"])
@@ -373,14 +376,14 @@ def handle_deluser(message: Message):
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip().lstrip("-").isdigit():
-        bot.reply_to(message, "用法：/deluser <user_id>")
+        bot.reply_to(message, "用法：/deluser &lt;user_id&gt;")
         return
     uid = int(parts[1].strip())
     removed = remove_from_whitelist(uid)
     if removed:
-        bot.reply_to(message, f"已从白名单移除用户 <code>{uid}</code>。")
+        bot.reply_to(message, f"✅ 已从白名单移除用户 <code>{uid}</code>。")
     else:
-        bot.reply_to(message, f"用户 <code>{uid}</code> 不在白名单中。")
+        bot.reply_to(message, f"❌ 用户 <code>{uid}</code> 不在白名单中。")
 
 
 @bot.message_handler(commands=["listusers"])
