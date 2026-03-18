@@ -16,5 +16,7 @@ services:
       REQUIRE_VARIANT: ${REQUIRE_VARIANT:-bd32}
       PREFER_APK: ${PREFER_APK:-true}
       REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-60}
+      DELETE_AFTER_PUSH: ${DELETE_AFTER_PUSH:-false}
+      MAX_KEEP_FILES: ${MAX_KEEP_FILES:-5}
     volumes:
       - ./data:/data
