@@ -84,7 +84,7 @@ Bot started. Target: (未配置) | Cron: 0 9 * * * (Asia/Shanghai)
 - **应用列表页**（自动找最新 release）：`.../apk/<developer>/<app-name>/`
 - **指定 release 页**（固定抓这一版）：`.../apk/<developer>/<app-name>/<app-name>-x.x.x-release/`
 
-配置成功后发 `/checknow` 立即验证。
+配置成功后发 `/check` 立即验证。
 
 ---
 
@@ -95,7 +95,9 @@ Bot started. Target: (未配置) | Cron: 0 9 * * * (Asia/Shanghai)
 | 命令 | 说明 |
 |------|------|
 | `/sub <url>` | 设置监控地址（持久化到本地数据库） |
-| `/checknow` | 立即触发一次抓取和推送 |
+| `/unsub` | 清除监控地址（取消订阅） |
+| `/sublist` | 查看当前监控地址 |
+| `/check` | 立即触发一次抓取和推送 |
 | `/status` | 查看当前配置和最近一次运行状态 |
 
 ---
@@ -133,38 +135,29 @@ docker compose down
 
 在 `.env` 中按需配置，不填则不过滤。
 
-```env
-# APK 类型
-PREFER_APK=true         # 优先选 APK，跳过 BUNDLE
-ALLOW_BUNDLE=false      # 是否允许 BUNDLE
-
-# Variant 过滤（逗号分隔）
-REQUIRED_SIGNATURES=3891,bd32   # 必须同时包含所有签名（AND）
-REQUIRED_ARCHITECTURES=arm64-v8a,armeabi-v7a  # 至少命中一个（OR）
-REQUIRED_DPI=nodpi              # 指定 DPI
-REQUIRED_DEVICE_TYPE=universal  # 指定设备类型
-
-# Android 版本范围（API 等级整数）
-MIN_ANDROID_FLOOR=21
-MIN_ANDROID_CEILING=
-
-# 关键词过滤
-MATCH_KEYWORDS=          # 命中任一关键词才保留
-EXCLUDE_KEYWORDS=        # 命中任一关键词则排除
-
-# 文件清理
-DELETE_AFTER_PUSH=false  # 推送后立即删除 APK
-MAX_KEEP_FILES=5         # 最多保留 N 个 APK（0 = 不限）
-```
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `PREFER_APK` | `true` | 优先选 APK，跳过 BUNDLE |
+| `ALLOW_BUNDLE` | `false` | 是否允许 BUNDLE |
+| `REQUIRED_SIGNATURES` | 空（不过滤） | 逗号分隔，必须同时包含所有签名（AND）。示例：`3891,bd32` |
+| `REQUIRED_ARCHITECTURES` | 空（不过滤） | 逗号分隔，至少命中一个（OR）。示例：`arm64-v8a,armeabi-v7a` |
+| `REQUIRED_DPI` | 空（不过滤） | 指定 DPI。示例：`nodpi` |
+| `REQUIRED_DEVICE_TYPE` | 空（不过滤） | 指定设备类型。示例：`universal` |
+| `MIN_ANDROID_FLOOR` | 空（不过滤） | 最低 API 等级下限（整数）。示例：`21` |
+| `MIN_ANDROID_CEILING` | 空（不过滤） | 最低 API 等级上限（整数） |
+| `MATCH_KEYWORDS` | 空（不过滤） | 逗号分隔，命中任一才保留 |
+| `EXCLUDE_KEYWORDS` | 空（不过滤） | 逗号分隔，命中任一则排除 |
+| `DELETE_AFTER_PUSH` | `false` | 推送后立即删除 APK 文件 |
+| `MAX_KEEP_FILES` | `5` | 最多保留 N 个 APK（`0` = 不限） |
 
 ---
 
 ## 常见问题
 
-**Q：`/checknow` 提示"未配置监控地址"**
+**Q：`/check` 提示"未配置监控地址"**
 先发送 `/sub <url>` 配置。
 
-**Q：`/checknow` 提示"没有 variant 通过过滤条件"**
+**Q：`/check` 提示"没有 variant 通过过滤条件"**
 检查 `REQUIRED_SIGNATURES` / `REQUIRED_ARCHITECTURES` 是否过严，或暂时清空这些参数再测试。
 
 **Q：推送失败**
