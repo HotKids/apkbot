@@ -25,6 +25,7 @@ _RETRY_BACKOFF_BASE = 1  # 秒；延迟依次为 1s, 2s, 4s
 
 # Android (major, minor) → API 等级（含 .1 小版本）
 _ANDROID_API_MAP: dict[tuple[int, int], int] = {
+    (4, 0): 14, (4, 1): 16, (4, 2): 17, (4, 3): 18, (4, 4): 19,
     (5, 0): 21, (5, 1): 22,
     (6, 0): 23,
     (7, 0): 24, (7, 1): 25,
@@ -94,11 +95,17 @@ def is_release_url(url: str) -> bool:
 
 
 def get_release_url(session: requests.Session, apk_url: str) -> str:
-    """若 apk_url 已是 release 页则直接返回；否则从 app 列表页抓取第一个 release 链接。"""
+    """若 apk_url 已是 release 页则直接返回；否则从 app 列表页抓取最新 release 链接。"""
     if is_release_url(apk_url):
         return apk_url.rstrip("/") + "/"
     r = session_get(session, apk_url)
     soup = BeautifulSoup(r.text, "lxml")
+    # 精准定位主列表，规避侧边栏"热门下载"中的旧版本链接
+    for a in soup.select(".listWidget .appRow a.fontBlack, .appRow > div > a.fontBlack"):
+        href = a.get("href", "")
+        if href and is_release_url(href):
+            return urljoin(BASE_URL, href)
+    # 降级：全页搜索（CSS 结构变更时的保底）
     for a in soup.select("a[href]"):
         href = a.get("href", "")
         if href and is_release_url(href):
@@ -156,8 +163,9 @@ def _find_row(tag: Tag) -> Optional[Tag]:
 
 
 def _parse_signatures(text: str) -> list[str]:
-    """从 raw_text 提取 4 位小写十六进制串（APKMirror 签名格式）。"""
-    return list(dict.fromkeys(re.findall(r"\b[0-9a-f]{4}\b", text.lower())))
+    """从 raw_text 提取 4 位小写十六进制串（APKMirror 签名格式），排除年份干扰。"""
+    sigs = re.findall(r"\b[0-9a-f]{4}\b", text.lower())
+    return list(dict.fromkeys(s for s in sigs if not re.match(r"^20[1-3]\d$", s)))
 
 
 def _parse_architectures(text: str) -> list[str]:
@@ -175,7 +183,7 @@ def _parse_android_api(text: str) -> Optional[int]:
     if m:
         major = int(m.group(1))
         minor = int(m.group(2)) if m.group(2) else 0
-        return _ANDROID_API_MAP.get((major, minor), _ANDROID_API_MAP.get((major, 0), major * 10))
+        return _ANDROID_API_MAP.get((major, minor), _ANDROID_API_MAP.get((major, 0)))
     return None
 
 
