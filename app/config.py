@@ -37,6 +37,11 @@ REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "60"))
 PREFER_APK: bool = os.getenv("PREFER_APK", "true").lower() == "true"
 ALLOW_BUNDLE: bool = os.getenv("ALLOW_BUNDLE", "false").lower() == "true"
 
+# ---------- 可选：打分偏好 ----------
+PREFER_UNIVERSAL: bool = os.getenv("PREFER_UNIVERSAL", "true").lower() == "true"
+PREFER_LOWER_ANDROID: bool = os.getenv("PREFER_LOWER_ANDROID", "true").lower() == "true"
+PREFER_MULTI_SIGNATURE: bool = os.getenv("PREFER_MULTI_SIGNATURE", "true").lower() == "true"
+
 # ---------- 可选：Variant 过滤 ----------
 REQUIRED_SIGNATURES: list[str] = _parse_list("REQUIRED_SIGNATURES")
 REQUIRED_ARCHITECTURES: list[str] = _parse_list("REQUIRED_ARCHITECTURES")

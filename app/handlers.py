@@ -25,12 +25,12 @@ from database import (
     update_apk_version,
 )
 from scraper import (
-    Variant,
     cleanup_after_push,
     new_session,
     resolve_and_download,
     scrape_and_pick,
 )
+from selector import Variant
 
 logger = logging.getLogger("apkmirror-bot")
 

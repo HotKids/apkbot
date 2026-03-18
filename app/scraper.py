@@ -2,7 +2,6 @@ import hashlib
 import logging
 import re
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
@@ -20,6 +19,10 @@ from config import (
     MAX_KEEP_FILES,
     MIN_ANDROID_CEILING,
     MIN_ANDROID_FLOOR,
+    PREFER_APK,
+    PREFER_LOWER_ANDROID,
+    PREFER_MULTI_SIGNATURE,
+    PREFER_UNIVERSAL,
     REQUEST_TIMEOUT,
     REQUIRED_ARCHITECTURES,
     REQUIRED_DEVICE_TYPE,
@@ -27,6 +30,7 @@ from config import (
     REQUIRED_SIGNATURES,
     USER_AGENT,
 )
+from selector import SelectorConfig, Variant, select_best_variant
 
 logger = logging.getLogger("apkmirror-bot")
 
@@ -42,30 +46,7 @@ _ANDROID_API_MAP: dict[int, int] = {
 _KNOWN_ARCHITECTURES = ["arm64-v8a", "armeabi-v7a", "x86_64", "x86", "universal"]
 _KNOWN_DPI = ["nodpi", "160dpi", "240dpi", "320dpi", "480dpi", "640dpi"]
 
-
-# ---------------------------------------------------------------------------
-# Variant 数据类
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Variant:
-    app_name: str
-    release_version_name: str
-    version_code: Optional[int]
-    variant_label: str
-    type: str                       # "APK" | "BUNDLE"
-    is_bundle: bool
-    signatures: list[str]           # 从 raw_text 提取的 4 位 hex 串
-    architectures: list[str]
-    min_android_text: Optional[str]
-    min_android_api: Optional[int]
-    dpi: Optional[str]
-    device_type: Optional[str]
-    release_url: str
-    variant_url: str
-    download_page_url: Optional[str] = None
-    final_download_url: Optional[str] = None
-    raw_text: str = ""
+# Variant 数据类由 selector 模块提供（避免重复定义）
 
 
 # ---------------------------------------------------------------------------
@@ -289,71 +270,26 @@ def parse_variants(session: requests.Session, release_url: str) -> list[Variant]
 
 
 # ---------------------------------------------------------------------------
-# 过滤 & 打分
+# 过滤 & 打分 & 选择（委托给 selector 模块）
 # ---------------------------------------------------------------------------
 
-def filter_variants(variants: list[Variant]) -> list[Variant]:
-    result = []
-    for v in variants:
-        # 1. 类型过滤（PREFER_APK 仅影响打分，不强制排除）
-        if v.is_bundle and not ALLOW_BUNDLE:
-            continue
-        # 2. 签名过滤（AND：必须全部命中）
-        if REQUIRED_SIGNATURES:
-            if not all(sig in v.signatures for sig in REQUIRED_SIGNATURES):
-                continue
-        # 3. 架构过滤（OR：至少命中一个）
-        if REQUIRED_ARCHITECTURES:
-            if not any(a in v.architectures for a in REQUIRED_ARCHITECTURES):
-                continue
-        # 4. DPI 过滤
-        if REQUIRED_DPI and v.dpi != REQUIRED_DPI:
-            continue
-        # 5. 设备类型过滤
-        if REQUIRED_DEVICE_TYPE and v.device_type != REQUIRED_DEVICE_TYPE:
-            continue
-        # 6. Android 版本范围过滤
-        if MIN_ANDROID_FLOOR is not None and v.min_android_api is not None:
-            if v.min_android_api < MIN_ANDROID_FLOOR:
-                continue
-        if MIN_ANDROID_CEILING is not None and v.min_android_api is not None:
-            if v.min_android_api > MIN_ANDROID_CEILING:
-                continue
-        # 7. 排除关键词
-        if EXCLUDE_KEYWORDS:
-            if any(kw.lower() in v.raw_text.lower() for kw in EXCLUDE_KEYWORDS):
-                continue
-        # 8. 必需关键词（OR：至少命中一个）
-        if MATCH_KEYWORDS:
-            if not any(kw.lower() in v.raw_text.lower() for kw in MATCH_KEYWORDS):
-                continue
-        result.append(v)
-    return result
-
-
-def score_variant(v: Variant) -> float:
-    s = 0.0
-    if v.type == "APK":
-        s += 100
-    if len(v.signatures) > 1:
-        s += 20
-    if "arm64-v8a" in v.architectures:
-        s += 30
-    elif "armeabi-v7a" in v.architectures:
-        s += 20
-    elif "x86_64" in v.architectures:
-        s += 10
-    elif "x86" in v.architectures:
-        s += 5
-    if v.device_type == "universal":
-        s += 15
-    if v.dpi == "nodpi":
-        s += 10
-    if v.min_android_api is not None:
-        s += max(0, 30 - v.min_android_api)
-    if v.version_code is not None:
-        s += v.version_code / 1_000_000
-    return s
+def _build_selector_config() -> SelectorConfig:
+    """从当前 config 模块的常量构造 SelectorConfig。"""
+    return SelectorConfig(
+        prefer_apk=PREFER_APK,
+        allow_bundle=ALLOW_BUNDLE,
+        required_signatures=REQUIRED_SIGNATURES,
+        required_architectures=REQUIRED_ARCHITECTURES,
+        required_dpi=REQUIRED_DPI or None,
+        required_device_type=REQUIRED_DEVICE_TYPE or None,
+        min_android_floor=MIN_ANDROID_FLOOR,
+        min_android_ceiling=MIN_ANDROID_CEILING,
+        match_keywords=MATCH_KEYWORDS,
+        exclude_keywords=EXCLUDE_KEYWORDS,
+        prefer_universal=PREFER_UNIVERSAL,
+        prefer_lower_android=PREFER_LOWER_ANDROID,
+        prefer_multi_signature=PREFER_MULTI_SIGNATURE,
+    )
 
 
 def scrape_and_pick(session: requests.Session, apk_url: str) -> Variant:
@@ -364,20 +300,19 @@ def scrape_and_pick(session: requests.Session, apk_url: str) -> Variant:
     logger.info("共解析 %d 个 variant", len(all_variants))
     if not all_variants:
         raise RuntimeError("Release 页未找到任何 variant")
-    candidates = filter_variants(all_variants)
-    logger.info("过滤后剩余 %d 个候选 variant", len(candidates))
-    if not candidates:
+
+    cfg = _build_selector_config()
+    best = select_best_variant(all_variants, cfg)
+    if best is None:
         raise RuntimeError(
             f"没有 variant 通过过滤条件（共 {len(all_variants)} 个）。"
             "请检查 REQUIRED_SIGNATURES / REQUIRED_ARCHITECTURES 等配置。"
         )
-    candidates.sort(key=score_variant, reverse=True)
-    best = candidates[0]
     logger.info(
-        "选中：%s | %s | %s | api=%s | dpi=%s | score=%.2f",
+        "选中：%s | %s | %s | api=%s | dpi=%s",
         best.variant_label, best.type,
         best.architectures, best.min_android_api,
-        best.dpi, score_variant(best),
+        best.dpi,
     )
     return best
 
