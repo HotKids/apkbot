@@ -415,6 +415,27 @@ def _extract_js_str(html: str, key: str) -> Optional[str]:
     return None
 
 
+def _extract_wp_nonce(html: str) -> Optional[str]:
+    """从 HTML 中提取 WordPress nonce（含 _wpnonce 和 nonce 变量，支持注释中的值）。"""
+    for pattern in [
+        r'"nonce"\s*:\s*"([a-f0-9]+)"',
+        r"'nonce'\s*:\s*'([a-f0-9]+)'",
+        r"var\s+nonce\s*=\s*['\"]([a-f0-9]+)['\"]",
+        # _wpnonce 可能在注释（/**...*/）或赋值中
+        r"_wpnonce['\",\s:=/\*]+\s*['\"]([a-f0-9]+)['\"]",
+    ]:
+        m = re.search(pattern, html)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _extract_ajaxurl(html: str) -> str:
+    """从页面中提取 WordPress ajaxurl（可能带 /wordpress/ 前缀）。"""
+    m = re.search(r"ajaxurl\s*=\s*['\"]([^'\"]+)['\"]", html)
+    return m.group(1) if m else "/wp-admin/admin-ajax.php"
+
+
 def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> str:
     r = session_get(session, download_page_url)
     soup = BeautifulSoup(r.text, "lxml")
@@ -465,32 +486,63 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
             if resolved:
                 return resolved
 
-    # 6. 从页面内嵌 JS 变量提取 nonce + id，调用 WordPress AJAX 端点
-    nonce = _extract_js_str(html, "nonce")
-    file_id = _extract_js_str(html, "id") or _extract_js_str(html, "file_id")
-    if nonce and file_id:
-        ajax_url = urljoin(BASE_URL, "/wp-admin/admin-ajax.php")
-        for action in ["apkm_generate_download_key_ajax", "get_download_key", "apkm_download_v2"]:
+    # 6. WordPress AJAX 解锁下载
+    #    确认页 JS 会在倒计时后向 ajaxurl 发送解锁请求，我们在此复现该调用。
+    #    ajaxurl 从页面提取（APKMirror 用 /wordpress/wp-admin/admin-ajax.php 而非 /wp-admin/）
+    _key_m = re.search(r"[?&]key=([a-f0-9]+)", download_page_url)
+    _post_id = _extract_post_id(soup, html)
+    if _key_m and _post_id:
+        _dl_key = _key_m.group(1)
+        _forcebase = "true" if "forcebaseapk" in download_page_url else "false"
+        _ajax_base = _extract_ajaxurl(html)          # e.g. /wordpress/wp-admin/admin-ajax.php
+        _ajax_full = urljoin(BASE_URL, _ajax_base)
+        _nonce = _extract_wp_nonce(html)             # 可能是 None，也尝试无 nonce 调用
+        logger.debug(
+            "Step6 ajaxurl=%s post_id=%s key=%s nonce=%s",
+            _ajax_full, _post_id, _dl_key, _nonce,
+        )
+        for _action in [
+            "apkm_generate_download_key_ajax",
+            "generate_download_key_ajax",
+            "get_download_key",
+            "apkm_download_v2",
+            "apkm_download",
+        ]:
+            _data: dict = {
+                "action": _action,
+                "id": _post_id,
+                "key": _dl_key,
+                "forcebaseapk": _forcebase,
+            }
+            if _nonce:
+                _data["nonce"] = _nonce
+                _data["_wpnonce"] = _nonce
             try:
-                resp = session.post(
-                    ajax_url,
-                    data={"action": action, "nonce": nonce, "id": file_id},
+                _resp = session.post(
+                    _ajax_full,
+                    data=_data,
                     timeout=15,
-                    headers={"Referer": download_page_url, "X-Requested-With": "XMLHttpRequest"},
+                    headers={
+                        "Referer": download_page_url,
+                        "X-Requested-With": "XMLHttpRequest",
+                    },
                 )
-                if resp.ok:
-                    txt = resp.text.strip()
-                    if txt.startswith("{"):
-                        data = resp.json()
-                        url = (
-                            data.get("url") or data.get("download_url")
-                            or data.get("link")
-                            or (data.get("data") or {}).get("url")
-                        )
-                        if url:
-                            return url.replace("\\/", "/")
-            except Exception as e:
-                logger.debug("AJAX action=%s 失败：%s", action, e)
+                _txt = _resp.text.strip()
+                logger.debug(
+                    "AJAX action=%s → HTTP %d: %s",
+                    _action, _resp.status_code, _txt[:300],
+                )
+                if _resp.ok and _txt.startswith("{"):
+                    _d = _resp.json()
+                    _url = (
+                        _d.get("url") or _d.get("download_url")
+                        or _d.get("link")
+                        or (_d.get("data") or {}).get("url")
+                    )
+                    if _url:
+                        return _url.replace("\\/", "/")
+            except Exception as _e:
+                logger.debug("AJAX action=%s 异常：%s", _action, _e)
 
     # 诊断日志：打出 post_id / nonce / file_id 以及含关键词的 script 标签内容
     title = soup.title.string if soup.title else "(no title)"
