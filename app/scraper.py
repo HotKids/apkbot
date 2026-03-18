@@ -360,7 +360,8 @@ def download_file(session: requests.Session, file_url: str, fallback_name: str) 
             filename = m.group(1).strip()
         if not filename:
             url_name = file_url.split("/")[-1].split("?")[0]
-            filename = url_name if url_name and url_name.lower() != "download" else fallback_name
+            _SKIP = {"download", "download.php"}
+            filename = url_name if url_name and url_name.lower() not in _SKIP else fallback_name
         out_path = DOWNLOAD_DIR / filename
         with out_path.open("wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 512):

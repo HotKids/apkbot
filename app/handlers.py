@@ -106,7 +106,8 @@ def _send_apk_to_user(chat_id: int, variant: Variant, apk_path: Path, sha256: st
         bot.send_document(
             chat_id,
             f,
-            visible_file_name=apk_path.name,
+            visible_file_name=re.sub(r'\s+', "_", re.sub(r'[\\/*?:"<>|]', "_",
+                f"{variant.app_name}_{variant.release_version_name}")) + (".apkm" if variant.is_bundle else ".apk"),
             caption=caption,
             timeout=300,
         )
