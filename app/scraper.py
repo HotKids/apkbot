@@ -245,7 +245,10 @@ def parse_variants(session: requests.Session, release_url: str) -> list[Variant]
                 break
         raw_text = " ".join(filter(None, raw_parts))
 
-        is_bundle = "BUNDLE" in raw_text
+        # 仅在行级作用域检测类型，避免将同表格其他行的 "BUNDLE" 文字误判到本行
+        row = _find_row(a)
+        row_text = row.get_text(" ", strip=True) if row else raw_text
+        is_bundle = "BUNDLE" in row_text
         archs = _parse_architectures(raw_text)
         dpi = _parse_dpi(raw_text)
         android_text = _parse_android_text(raw_text)
@@ -323,7 +326,7 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
     for a in soup.select("a[href]"):
         text = a.get_text(" ", strip=True).lower()
         href = a.get("href", "")
-        if "download apk" in text or href.endswith(".apk"):
+        if "download apk" in text or href.endswith(".apk") or href.endswith(".apkm"):
             return urljoin(BASE_URL, href)
     for a in soup.select('a[href*="/wp-content/"]'):
         return urljoin(BASE_URL, a.get("href"))
