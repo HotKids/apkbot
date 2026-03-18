@@ -137,7 +137,7 @@ docker compose down
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `PREFER_APK` | `true` | 优先选 APK，跳过 BUNDLE |
+| `PREFER_APK` | `true` | APK 打分高于 BUNDLE（+100 分），不强制排除 |
 | `ALLOW_BUNDLE` | `false` | 是否允许 BUNDLE |
 | `REQUIRED_SIGNATURES` | 空（不过滤） | 逗号分隔，必须同时包含所有签名（AND）。示例：`3891,bd32` |
 | `REQUIRED_ARCHITECTURES` | 空（不过滤） | 逗号分隔，至少命中一个（OR）。示例：`arm64-v8a,armeabi-v7a` |
@@ -162,6 +162,9 @@ docker compose down
 
 **Q：推送失败**
 确认 bot 已加入目标频道且拥有发送文件权限，chat_id 格式正确（频道通常为 `-100` 开头）。
+
+**Q：收到"超过 50 MB 限制"的文字消息而非文件**
+Telegram Bot API 文件上传上限为 50 MB。Bot 会改为发送文字摘要和 APKMirror 下载链接，请手动下载。
 
 **Q：一直提示"没有新版本"**
 当前版本已推送过。修改 `APK_URL` 到新 release 页，或等下一个版本发布。

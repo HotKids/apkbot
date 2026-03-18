@@ -20,7 +20,6 @@ from config import (
     MAX_KEEP_FILES,
     MIN_ANDROID_CEILING,
     MIN_ANDROID_FLOOR,
-    PREFER_APK,
     REQUEST_TIMEOUT,
     REQUIRED_ARCHITECTURES,
     REQUIRED_DEVICE_TYPE,
@@ -296,10 +295,8 @@ def parse_variants(session: requests.Session, release_url: str) -> list[Variant]
 def filter_variants(variants: list[Variant]) -> list[Variant]:
     result = []
     for v in variants:
-        # 1. 类型过滤
+        # 1. 类型过滤（PREFER_APK 仅影响打分，不强制排除）
         if v.is_bundle and not ALLOW_BUNDLE:
-            continue
-        if PREFER_APK and v.is_bundle:
             continue
         # 2. 签名过滤（AND：必须全部命中）
         if REQUIRED_SIGNATURES:
