@@ -1,42 +1,56 @@
-# APKMirror Google Play Store → Telegram Channel Bot
+# APKMirror Telegram Push Bot
 
-这是一个可直接部署到 VPS 的 Docker 版本，功能如下：
+从 APKMirror 自动抓取指定应用的最新 APK，按条件筛选后定时推送到 Telegram 频道或群组。
 
-- 每天定时检查 APKMirror 上的 Google Play Store 最新版本
-- 按条件筛选 `signature=3891` + `variant=bd32`
-- 默认优先选择 `APK`，不选 `BUNDLE`
-- 下载后自动发到已绑定的 Telegram 频道
-- 首次私聊 bot 的用户自动成为 owner
-- owner 把频道中的任意一条消息转发给 bot，即可完成频道绑定
-- 用 SQLite 保存已推送版本，避免重复发送
+- 纯 ENV 配置驱动，无需交互式绑定
+- 支持任意 APKMirror 应用页或 release 页
+- Variant 结构化解析 + 过滤 + 打分排序
+- SQLite 去重，避免重复推送
+- Docker 单容器部署
 
-## 重要说明
+---
 
-这个版本是“能直接部署”的版本，但 APKMirror 页面结构或风控策略将来可能变化，所以抓取逻辑不保证永久稳定。
+## 前置条件
+
+- VPS（已安装 Docker & Docker Compose）
+- Telegram Bot Token（从 [@BotFather](https://t.me/BotFather) 获取）
+- 你的 Telegram 账号 user_id（可通过 [@userinfobot](https://t.me/userinfobot) 查询）
+- 目标频道或群组的 chat_id（频道格式通常为 `-100xxxxxxxxxx`）
+- Bot 已加入目标频道 / 群组，并拥有**发送消息、发送文件**权限
+
+---
 
 ## 部署步骤
 
-### 1. 上传到 VPS
-
-把整个目录上传到 VPS，例如：
+### 1. 拉取代码
 
 ```bash
-scp -r apkmirror_tg_bot root@your-vps:/opt/
-cd /opt/apkmirror_tg_bot
+git clone https://github.com/HotKids/apkmirror_tg_bot.git
+cd apkmirror_tg_bot
 ```
 
-### 2. 准备环境变量
+### 2. 配置环境变量
 
 ```bash
 cp .env.example .env
 nano .env
 ```
 
-至少改掉：
+必填项（共 4 个）：
 
 ```env
-BOT_TOKEN=你的TelegramBotToken
+BOT_TOKEN=123456:ABCDEF
+OWNER_ID=123456789
+TARGET_CHAT_ID=-1001234567890
+CRON_SCHEDULE=0 9 * * *
 ```
+
+| 变量 | 说明 |
+|------|------|
+| `BOT_TOKEN` | BotFather 给的 token |
+| `OWNER_ID` | 你的 Telegram user_id（整数） |
+| `TARGET_CHAT_ID` | 推送目标频道 / 群组的 chat_id |
+| `CRON_SCHEDULE` | 定时表达式（标准 5 字段，如 `0 9 * * *` = 每天 09:00） |
 
 ### 3. 启动
 
@@ -50,53 +64,52 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-## 初始化和绑定频道
+看到以下输出说明启动成功：
 
-### 第一步：私聊 bot
-
-给 bot 发送：
-
-```text
-/start
+```
+Bot started. Target: (未配置) | Cron: 0 9 * * * (Asia/Shanghai)
 ```
 
-如果当前还没有 owner，bot 会把第一个私聊它的人自动设为 owner。
+---
 
-### 第二步：把 bot 加进频道
+## 初始化：设置监控地址
 
-把 bot 加入目标频道，并给它管理员权限。
+启动后，私信 bot 发送 `/sub` 命令配置要监控的 APKMirror 页面：
 
-至少要有：
-
-- 发送消息
-- 发送媒体
-- 发送文件
-
-### 第三步：转发频道消息给 bot
-
-在频道里随便发一条消息，再把这条消息转发给 bot 私聊。
-
-bot 识别成功后，就会保存这个频道。
-
-## 命令
-
-在私聊里由 owner 使用：
-
-```text
-/help
-/channels
-/unbind -100xxxxxxxxxx
-/checknow
-/status
 ```
+/sub https://www.apkmirror.com/apk/google-inc/google-play-store/
+```
+
+支持两种 URL 格式：
+- **应用列表页**（自动找最新 release）：`.../apk/<developer>/<app-name>/`
+- **指定 release 页**（固定抓这一版）：`.../apk/<developer>/<app-name>/<app-name>-x.x.x-release/`
+
+配置成功后发 `/checknow` 立即验证。
+
+---
+
+## Bot 命令
+
+所有命令仅限私信，且只有 `OWNER_ID` 可用。
+
+| 命令 | 说明 |
+|------|------|
+| `/sub <url>` | 设置监控地址（持久化到本地数据库） |
+| `/checknow` | 立即触发一次抓取和推送 |
+| `/status` | 查看当前配置和最近一次运行状态 |
+
+---
 
 ## 升级
 
-代码更新后执行：
-
 ```bash
+git pull
 docker compose up -d --build
 ```
+
+数据库和下载文件保存在 `./data/`，升级不影响历史记录。
+
+---
 
 ## 停止
 
@@ -104,34 +117,61 @@ docker compose up -d --build
 docker compose down
 ```
 
+---
+
 ## 数据目录
 
-数据保存在宿主机：
-
-```text
-./data/
-  ├── app.db
-  └── downloads/
 ```
+./data/
+  ├── app.db        # SQLite（状态、去重记录、监控地址）
+  └── downloads/    # 下载的 APK 文件
+```
+
+---
+
+## 可选过滤参数
+
+在 `.env` 中按需配置，不填则不过滤。
+
+```env
+# APK 类型
+PREFER_APK=true         # 优先选 APK，跳过 BUNDLE
+ALLOW_BUNDLE=false      # 是否允许 BUNDLE
+
+# Variant 过滤（逗号分隔）
+REQUIRED_SIGNATURES=3891,bd32   # 必须同时包含所有签名（AND）
+REQUIRED_ARCHITECTURES=arm64-v8a,armeabi-v7a  # 至少命中一个（OR）
+REQUIRED_DPI=nodpi              # 指定 DPI
+REQUIRED_DEVICE_TYPE=universal  # 指定设备类型
+
+# Android 版本范围（API 等级整数）
+MIN_ANDROID_FLOOR=21
+MIN_ANDROID_CEILING=
+
+# 关键词过滤
+MATCH_KEYWORDS=          # 命中任一关键词才保留
+EXCLUDE_KEYWORDS=        # 命中任一关键词则排除
+
+# 文件清理
+DELETE_AFTER_PUSH=false  # 推送后立即删除 APK
+MAX_KEEP_FILES=5         # 最多保留 N 个 APK（0 = 不限）
+```
+
+---
 
 ## 常见问题
 
-### 1. bot 绑定不了频道
+**Q：`/checknow` 提示"未配置监控地址"**
+先发送 `/sub <url>` 配置。
 
-通常是这几个原因：
+**Q：`/checknow` 提示"没有 variant 通过过滤条件"**
+检查 `REQUIRED_SIGNATURES` / `REQUIRED_ARCHITECTURES` 是否过严，或暂时清空这些参数再测试。
 
-- bot 没有加入频道
-- bot 不是频道管理员
-- 转发的不是频道消息，而是普通群消息
+**Q：推送失败**
+确认 bot 已加入目标频道且拥有发送文件权限，chat_id 格式正确（频道通常为 `-100` 开头）。
 
-### 2. 能绑定但发不出去文件
+**Q：一直提示"没有新版本"**
+当前版本已推送过。修改 `APK_URL` 到新 release 页，或等下一个版本发布。
 
-一般是频道管理员权限不够。
-
-### 3. 一直提示没有新版本
-
-说明当前筛选条件下没有新包，或者之前已经推送过了。
-
-### 4. 抓取失败
-
-APKMirror 可能变更了页面结构或启用了更强的风控。这个版本已经尽量做宽松匹配，但不保证永久可用。
+**Q：抓取失败**
+APKMirror 可能变更了页面结构，查看日志获取具体错误信息。
