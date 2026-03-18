@@ -334,13 +334,24 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
     for a in soup.select('a[href*="download.php?id="]'):
         return urljoin(BASE_URL, a.get("href"))
 
-    # 2. 寻找 "click here" 提示中的链接
+    # 2. 更宽泛：任何指向 download.php 的链接（参数顺序可能不同）
+    for a in soup.select('a[href*="download.php"]'):
+        return urljoin(BASE_URL, a.get("href"))
+
+    # 3. 寻找 "click here" 提示中的链接
     for a in soup.select("a[href]"):
         text = a.get_text(" ", strip=True).lower()
         href = a.get("href", "")
         if "here" in text and "key=" in href:
             return urljoin(BASE_URL, href)
 
+    # 诊断：打印页面标题 + 所有 href，帮助排查结构变更或 CF 拦截
+    title = soup.title.string if soup.title else "(no title)"
+    all_hrefs = [a.get("href", "") for a in soup.select("a[href]")][:20]
+    logger.error(
+        "无法解析下载直链。页面标题：%r  URL：%s\n  前20个链接：%s",
+        title, download_page_url, all_hrefs,
+    )
     raise RuntimeError("无法在中间页解析出真实的 APK 直链，可能是页面结构变更或触发了反爬")
 
 
