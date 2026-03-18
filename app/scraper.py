@@ -145,6 +145,11 @@ def _is_variant_link(href: str, release_url: str) -> bool:
         return False
     if not href.endswith("/") and not re.search(r"/[^/]+-\d+[^/]*/?$", href):
         return False
+    # 排除"汇总下载页"（URL 末段仅含短版本号，如 50-5-19）；
+    # 真实 variant 的 URL 含 build 码（6 位以上数字，如 pr-160218067）
+    last_segment = clean_href.split("/")[-1]
+    if not re.search(r"\d{6,}", last_segment):
+        return False
     return True
 
 
