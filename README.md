@@ -137,27 +137,6 @@ docker compose down
 
 ---
 
-## 可选过滤参数
-
-在 `.env` 中按需配置，不填则不过滤。
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `PREFER_APK` | `true` | APK 打分高于 BUNDLE（+100 分），不强制排除 |
-| `ALLOW_BUNDLE` | `false` | 是否允许 BUNDLE |
-| `REQUIRED_SIGNATURES` | 空（不过滤） | 逗号分隔，必须同时包含所有签名（AND）。示例：`3891,bd32` |
-| `REQUIRED_ARCHITECTURES` | 空（不过滤） | 逗号分隔，至少命中一个（OR）。示例：`arm64-v8a,armeabi-v7a` |
-| `REQUIRED_DPI` | 空（不过滤） | 指定 DPI。示例：`nodpi` |
-| `REQUIRED_DEVICE_TYPE` | 空（不过滤） | 指定设备类型。示例：`universal` |
-| `MIN_ANDROID_FLOOR` | 空（不过滤） | 最低 API 等级下限（整数）。示例：`21` |
-| `MIN_ANDROID_CEILING` | 空（不过滤） | 最低 API 等级上限（整数） |
-| `MATCH_KEYWORDS` | 空（不过滤） | 逗号分隔，命中任一才保留 |
-| `EXCLUDE_KEYWORDS` | 空（不过滤） | 逗号分隔，命中任一则排除 |
-| `DELETE_AFTER_PUSH` | `false` | 推送后立即删除 APK 文件 |
-| `MAX_KEEP_FILES` | `5` | 最多保留 N 个 APK（`0` = 不限） |
-
----
-
 ## 常见问题
 
 **Q：`/check` 提示"当前无订阅"**
