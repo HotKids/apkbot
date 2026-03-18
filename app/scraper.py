@@ -330,27 +330,40 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
     r = session_get(session, download_page_url)
     soup = BeautifulSoup(r.text, "lxml")
 
-    # 1. 真正的直链通常带有 download.php?id= (APKMirror 真实的下载网关)
-    for a in soup.select('a[href*="download.php?id="]'):
-        return urljoin(BASE_URL, a.get("href"))
-
-    # 2. 更宽泛：任何指向 download.php 的链接（参数顺序可能不同）
+    # 1. <a href> 中的 download.php 链接（旧版页面结构）
     for a in soup.select('a[href*="download.php"]'):
         return urljoin(BASE_URL, a.get("href"))
 
-    # 3. 寻找 "click here" 提示中的链接
+    # 2. "click here" 提示链接（含 key= 参数）
     for a in soup.select("a[href]"):
         text = a.get_text(" ", strip=True).lower()
         href = a.get("href", "")
         if "here" in text and "key=" in href:
             return urljoin(BASE_URL, href)
 
-    # 诊断：打印页面标题 + 所有 href，帮助排查结构变更或 CF 拦截
+    # 3. data-* 属性中的 download.php URL（JS 渲染时常见）
+    for tag in soup.find_all(True):
+        for val in (tag.attrs or {}).values():
+            if isinstance(val, str) and "download.php" in val:
+                return urljoin(BASE_URL, val)
+
+    # 4. 原始 HTML 全文正则扫描（覆盖 <script> 中的内嵌 URL）
+    #    APKMirror JS 代码里路径有时以 \/ 或 \u002F 转义
+    m = re.search(
+        r'(/wp-content/themes/APKMirror/download\.php[^"\'<>\s\\]+)',
+        r.text.replace("\\/", "/").replace("\\u002F", "/"),
+    )
+    if m:
+        return urljoin(BASE_URL, m.group(1))
+
+    # 诊断：打出 #file div 的 HTML + 前20个链接，用于排查结构变更或 CF 拦截
     title = soup.title.string if soup.title else "(no title)"
+    file_div = soup.find(id="file")
+    file_html = str(file_div)[:800] if file_div else "(#file div 不存在)"
     all_hrefs = [a.get("href", "") for a in soup.select("a[href]")][:20]
     logger.error(
-        "无法解析下载直链。页面标题：%r  URL：%s\n  前20个链接：%s",
-        title, download_page_url, all_hrefs,
+        "无法解析下载直链。页面标题：%r  URL：%s\n  #file div（前800字符）：%s\n  前20个链接：%s",
+        title, download_page_url, file_html, all_hrefs,
     )
     raise RuntimeError("无法在中间页解析出真实的 APK 直链，可能是页面结构变更或触发了反爬")
 
