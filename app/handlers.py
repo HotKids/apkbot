@@ -1,6 +1,8 @@
 import html
 import logging
+import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -36,6 +38,13 @@ logger = logging.getLogger("apkmirror-bot")
 
 bot = TeleBot(BOT_TOKEN, parse_mode="HTML")
 check_lock = threading.Lock()
+
+
+def _safe_send(chat_id: int, text: str, **kwargs) -> None:
+    try:
+        bot.send_message(chat_id, text, **kwargs)
+    except Exception:
+        logger.warning("发送消息失败：chat_id=%s", chat_id)
 
 
 def _now_iso() -> str:
@@ -100,15 +109,12 @@ def _send_apk_to_user(chat_id: int, variant: Variant, apk_path: Path, sha256: st
 
 def _send_current_version(chat_id: int, apk_url: str) -> None:
     """首次订阅时：抓取当前最新版并发给该用户，若该 URL 无版本记录则设置基线。"""
+    apk_path: Optional[Path] = None
     try:
         session = new_session()
         variant = scrape_and_pick(session, apk_url)
         apk_path, sha256 = resolve_and_download(session, variant)
-        try:
-            _send_apk_to_user(chat_id, variant, apk_path, sha256)
-        except Exception:
-            apk_path.unlink(missing_ok=True)
-            raise
+        _send_apk_to_user(chat_id, variant, apk_path, sha256)
         if not get_apk_version(apk_url):
             update_apk_version(
                 apk_url,
@@ -116,28 +122,28 @@ def _send_current_version(chat_id: int, apk_url: str) -> None:
                 last_version_name=variant.release_version_name,
                 last_version_code=variant.version_code,
                 last_sha256=sha256,
+                last_type=variant.type,
                 last_checked_at=_now_iso(),
                 last_pushed_at=_now_iso(),
             )
-        cleanup_after_push(apk_path)
     except Exception as e:
         logger.exception("首次推送失败：chat_id=%s url=%s", chat_id, apk_url)
-        try:
-            bot.send_message(chat_id, f"获取失败：{html.escape(str(e))}")
-        except Exception:
-            pass
+        _safe_send(chat_id, f"获取失败：{html.escape(str(e))}")
+    finally:
+        if apk_path is not None:
+            cleanup_after_push(apk_path)
 
 
 def _check_single_url(apk_url: str) -> str:
     """检查单个 URL，有新版则推送给所有订阅者，返回状态描述。"""
+    apk_path: Optional[Path] = None
     try:
         session = new_session()
         variant = scrape_and_pick(session, apk_url)
         apk_path, sha256 = resolve_and_download(session, variant)
 
-        if not is_new_version(apk_url, variant.variant_url, variant.version_code, sha256):
+        if not is_new_version(apk_url, variant.variant_url, variant.version_code, sha256, variant.type):
             update_apk_version(apk_url, last_checked_at=_now_iso())
-            apk_path.unlink(missing_ok=True)
             return f"无更新：{html.escape(apk_url.rstrip('/').split('/')[-1])} ({html.escape(variant.release_version_name)})"
 
         subscribers = get_subscribers(apk_url)
@@ -156,10 +162,10 @@ def _check_single_url(apk_url: str) -> str:
             last_version_name=variant.release_version_name,
             last_version_code=variant.version_code,
             last_sha256=sha256,
+            last_type=variant.type,
             last_checked_at=now,
             last_pushed_at=now,
         )
-        cleanup_after_push(apk_path)
         app_label = html.escape(apk_url.rstrip("/").split("/")[-1])
         return (
             f"新版本 {html.escape(variant.release_version_name)}（{app_label}）"
@@ -168,32 +174,28 @@ def _check_single_url(apk_url: str) -> str:
     except Exception as e:
         logger.exception("检查失败：%s", apk_url)
         return f"检查失败 {html.escape(apk_url)}：{html.escape(str(e))}"
+    finally:
+        if apk_path is not None:
+            cleanup_after_push(apk_path)
 
 
 def run_check_all(triggered_by: Optional[int] = None) -> None:
     """定时任务 / /check 手动触发：检查所有订阅 URL。"""
     if not check_lock.acquire(blocking=False):
         if triggered_by:
-            try:
-                bot.send_message(triggered_by, "已有检查任务在运行中。")
-            except Exception:
-                pass
+            _safe_send(triggered_by, "已有检查任务在运行中。")
         return
     try:
         urls = get_all_subscribed_urls()
         if not urls:
             if triggered_by:
-                try:
-                    bot.send_message(triggered_by, "当前无订阅。")
-                except Exception:
-                    pass
+                _safe_send(triggered_by, "当前无订阅。")
             return
-        results = [_check_single_url(url) for url in urls]
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(_check_single_url, url): url for url in urls}
+            results = [f.result() for f in as_completed(futures)]
         if triggered_by:
-            try:
-                bot.send_message(triggered_by, "\n".join(results))
-            except Exception:
-                logger.exception("发送检查结果给 owner 失败")
+            _safe_send(triggered_by, "\n".join(results))
     finally:
         check_lock.release()
 
@@ -211,7 +213,7 @@ def handle_sub(message: Message):
         bot.reply_to(message, "用法：/sub https://www.apkmirror.com/apk/...")
         return
     url = parts[1].strip()
-    if not url.startswith("https://www.apkmirror.com/apk/"):
+    if not re.match(r"^https?://(www\.)?apkmirror\.com/apk/", url):
         bot.reply_to(message, "URL 格式不对，需以 https://www.apkmirror.com/apk/ 开头。")
         return
     added = add_subscription(message.chat.id, url)

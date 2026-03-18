@@ -23,10 +23,16 @@ logger = logging.getLogger("apkmirror-bot")
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_BASE = 1  # 秒；延迟依次为 1s, 2s, 4s
 
-# Android 主版本号 → API 等级
-_ANDROID_API_MAP: dict[int, int] = {
-    5: 21, 6: 23, 7: 24, 8: 26, 9: 28,
-    10: 29, 11: 30, 12: 31, 13: 33, 14: 34, 15: 35,
+# Android (major, minor) → API 等级（含 .1 小版本）
+_ANDROID_API_MAP: dict[tuple[int, int], int] = {
+    (4, 0): 14, (4, 1): 16, (4, 2): 17, (4, 3): 18, (4, 4): 19,
+    (5, 0): 21, (5, 1): 22,
+    (6, 0): 23,
+    (7, 0): 24, (7, 1): 25,
+    (8, 0): 26, (8, 1): 27,
+    (9, 0): 28,
+    (10, 0): 29, (11, 0): 30, (12, 0): 31,
+    (13, 0): 33, (14, 0): 34, (15, 0): 35,
 }
 
 _KNOWN_ARCHITECTURES = ["arm64-v8a", "armeabi-v7a", "x86_64", "x86", "universal"]
@@ -55,18 +61,18 @@ def session_get(session: requests.Session, url: str, **kwargs) -> requests.Respo
     """带重试的 GET 请求（最多 3 次，指数退避 1s/2s/4s）。
 
     重试：ConnectionError、Timeout、HTTP 5xx
-    不重试：HTTP 4xx
+    不重试：HTTP 4xx（直接抛出）
     """
     last_exc: Exception = RuntimeError("unreachable")
     for attempt in range(_RETRY_ATTEMPTS):
         try:
             resp = session.get(url, timeout=REQUEST_TIMEOUT, **kwargs)
-            if resp.status_code < 500:
-                resp.raise_for_status()
-                return resp
-            last_exc = requests.HTTPError(
-                f"Server error {resp.status_code}", response=resp
-            )
+            resp.raise_for_status()
+            return resp
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code < 500:
+                raise  # 4xx 不重试
+            last_exc = e
         except (requests.ConnectionError, requests.Timeout) as e:
             last_exc = e
         if attempt < _RETRY_ATTEMPTS - 1:
@@ -89,11 +95,17 @@ def is_release_url(url: str) -> bool:
 
 
 def get_release_url(session: requests.Session, apk_url: str) -> str:
-    """若 apk_url 已是 release 页则直接返回；否则从 app 列表页抓取第一个 release 链接。"""
+    """若 apk_url 已是 release 页则直接返回；否则从 app 列表页抓取最新 release 链接。"""
     if is_release_url(apk_url):
         return apk_url.rstrip("/") + "/"
     r = session_get(session, apk_url)
     soup = BeautifulSoup(r.text, "lxml")
+    # 精准定位主列表，规避侧边栏"热门下载"中的旧版本链接
+    for a in soup.select(".listWidget .appRow a.fontBlack, .appRow > div > a.fontBlack"):
+        href = a.get("href", "")
+        if href and is_release_url(href):
+            return urljoin(BASE_URL, href)
+    # 降级：全页搜索（CSS 结构变更时的保底）
     for a in soup.select("a[href]"):
         href = a.get("href", "")
         if href and is_release_url(href):
@@ -151,8 +163,9 @@ def _find_row(tag: Tag) -> Optional[Tag]:
 
 
 def _parse_signatures(text: str) -> list[str]:
-    """从 raw_text 提取 4 位小写十六进制串（APKMirror 签名格式）。"""
-    return list(dict.fromkeys(re.findall(r"\b[0-9a-f]{4}\b", text.lower())))
+    """从 raw_text 提取 4 位小写十六进制串（APKMirror 签名格式），排除年份干扰。"""
+    sigs = re.findall(r"\b[0-9a-f]{4}\b", text.lower())
+    return list(dict.fromkeys(s for s in sigs if not re.match(r"^20[1-3]\d$", s)))
 
 
 def _parse_architectures(text: str) -> list[str]:
@@ -166,10 +179,11 @@ def _parse_android_text(text: str) -> Optional[str]:
 
 
 def _parse_android_api(text: str) -> Optional[int]:
-    m = re.search(r"Android\s+(\d+)", text, re.IGNORECASE)
+    m = re.search(r"Android\s+(\d+)(?:\.(\d+))?", text, re.IGNORECASE)
     if m:
         major = int(m.group(1))
-        return _ANDROID_API_MAP.get(major, major * 10)
+        minor = int(m.group(2)) if m.group(2) else 0
+        return _ANDROID_API_MAP.get((major, minor), _ANDROID_API_MAP.get((major, 0)))
     return None
 
 
@@ -271,10 +285,7 @@ def scrape_and_pick(session: requests.Session, apk_url: str) -> Variant:
     cfg = config_from_env(os.environ)
     best = select_best_variant(all_variants, cfg)
     if best is None:
-        raise RuntimeError(
-            f"没有 variant 通过过滤条件（共 {len(all_variants)} 个）。"
-            "请检查 REQUIRED_SIGNATURES / REQUIRED_ARCHITECTURES 等配置。"
-        )
+        raise RuntimeError(f"没有 variant 通过过滤条件（共 {len(all_variants)} 个）。")
     logger.info(
         "选中：%s | %s | %s | api=%s | dpi=%s",
         best.variant_label, best.type,
@@ -314,7 +325,7 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
     raise RuntimeError("无法找到 APK 最终下载链接")
 
 
-def download_file(session: requests.Session, file_url: str) -> Path:
+def download_file(session: requests.Session, file_url: str, fallback_name: str) -> Path:
     with session.get(file_url, stream=True, timeout=300, allow_redirects=True) as r:
         r.raise_for_status()
         filename = None
@@ -323,7 +334,8 @@ def download_file(session: requests.Session, file_url: str) -> Path:
         if m:
             filename = m.group(1).strip()
         if not filename:
-            filename = file_url.split("/")[-1].split("?")[0] or f"apk_{int(time.time())}.apk"
+            url_name = file_url.split("/")[-1].split("?")[0]
+            filename = url_name if url_name and url_name.lower() != "download" else fallback_name
         out_path = DOWNLOAD_DIR / filename
         with out_path.open("wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 512):
@@ -347,7 +359,11 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
     final_url = resolve_final_apk_url(session, download_page)
     variant.final_download_url = final_url
     logger.info("开始下载：%s", final_url)
-    apk_path = download_file(session, final_url)
+    raw_name = f"{variant.app_name}_{variant.variant_label}"
+    safe_name = re.sub(r'\s+', "_", re.sub(r'[\\/*?:"<>|]', "_", raw_name))
+    ext = ".apkm" if variant.is_bundle else ".apk"
+    fallback_name = f"{safe_name}{ext}"
+    apk_path = download_file(session, final_url, fallback_name)
     file_hash = sha256_file(apk_path)
     logger.info("下载完成：%s (%.2f MB, sha256=%s...)",
                 apk_path.name, apk_path.stat().st_size / 1024 / 1024, file_hash[:12])
