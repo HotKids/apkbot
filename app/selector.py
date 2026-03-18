@@ -111,7 +111,7 @@ def _parse_bool(value: str | None, default: bool = True) -> bool:
     支持：true/false、1/0、yes/no、on/off（大小写不敏感）。
     未设置时返回 default。
     """
-    if value is None:
+    if not value:  # None 或空串均回退到默认值
         return default
     return value.strip().lower() in {"true", "1", "yes", "on"}
 

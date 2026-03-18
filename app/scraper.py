@@ -23,10 +23,15 @@ logger = logging.getLogger("apkmirror-bot")
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_BASE = 1  # 秒；延迟依次为 1s, 2s, 4s
 
-# Android 主版本号 → API 等级
-_ANDROID_API_MAP: dict[int, int] = {
-    5: 21, 6: 23, 7: 24, 8: 26, 9: 28,
-    10: 29, 11: 30, 12: 31, 13: 33, 14: 34, 15: 35,
+# Android (major, minor) → API 等级（含 .1 小版本）
+_ANDROID_API_MAP: dict[tuple[int, int], int] = {
+    (5, 0): 21, (5, 1): 22,
+    (6, 0): 23,
+    (7, 0): 24, (7, 1): 25,
+    (8, 0): 26, (8, 1): 27,
+    (9, 0): 28,
+    (10, 0): 29, (11, 0): 30, (12, 0): 31,
+    (13, 0): 33, (14, 0): 34, (15, 0): 35,
 }
 
 _KNOWN_ARCHITECTURES = ["arm64-v8a", "armeabi-v7a", "x86_64", "x86", "universal"]
@@ -55,18 +60,18 @@ def session_get(session: requests.Session, url: str, **kwargs) -> requests.Respo
     """带重试的 GET 请求（最多 3 次，指数退避 1s/2s/4s）。
 
     重试：ConnectionError、Timeout、HTTP 5xx
-    不重试：HTTP 4xx
+    不重试：HTTP 4xx（直接抛出）
     """
     last_exc: Exception = RuntimeError("unreachable")
     for attempt in range(_RETRY_ATTEMPTS):
         try:
             resp = session.get(url, timeout=REQUEST_TIMEOUT, **kwargs)
-            if resp.status_code < 500:
-                resp.raise_for_status()
-                return resp
-            last_exc = requests.HTTPError(
-                f"Server error {resp.status_code}", response=resp
-            )
+            resp.raise_for_status()
+            return resp
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code < 500:
+                raise  # 4xx 不重试
+            last_exc = e
         except (requests.ConnectionError, requests.Timeout) as e:
             last_exc = e
         if attempt < _RETRY_ATTEMPTS - 1:
@@ -166,10 +171,11 @@ def _parse_android_text(text: str) -> Optional[str]:
 
 
 def _parse_android_api(text: str) -> Optional[int]:
-    m = re.search(r"Android\s+(\d+)", text, re.IGNORECASE)
+    m = re.search(r"Android\s+(\d+)(?:\.(\d+))?", text, re.IGNORECASE)
     if m:
         major = int(m.group(1))
-        return _ANDROID_API_MAP.get(major, major * 10)
+        minor = int(m.group(2)) if m.group(2) else 0
+        return _ANDROID_API_MAP.get((major, minor), _ANDROID_API_MAP.get((major, 0), major * 10))
     return None
 
 
@@ -271,10 +277,7 @@ def scrape_and_pick(session: requests.Session, apk_url: str) -> Variant:
     cfg = config_from_env(os.environ)
     best = select_best_variant(all_variants, cfg)
     if best is None:
-        raise RuntimeError(
-            f"没有 variant 通过过滤条件（共 {len(all_variants)} 个）。"
-            "请检查 REQUIRED_SIGNATURES / REQUIRED_ARCHITECTURES 等配置。"
-        )
+        raise RuntimeError(f"没有 variant 通过过滤条件（共 {len(all_variants)} 个）。")
     logger.info(
         "选中：%s | %s | %s | api=%s | dpi=%s",
         best.variant_label, best.type,

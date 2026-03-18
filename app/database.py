@@ -47,11 +47,17 @@ def init_db() -> None:
                 last_version_name TEXT,
                 last_version_code INTEGER,
                 last_sha256       TEXT,
+                last_type         TEXT,
                 last_checked_at   TEXT,
                 last_pushed_at    TEXT
             );
             """
         )
+        # 兼容旧数据库：补充 last_type 列（已存在则忽略）
+        try:
+            conn.execute("ALTER TABLE apk_versions ADD COLUMN last_type TEXT")
+        except sqlite3.OperationalError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -193,14 +199,21 @@ def is_new_version(
     variant_url: str,
     version_code: Optional[int],
     sha256: str,
+    variant_type: str = "",
 ) -> bool:
-    """三级去重：variant_url / version_code / sha256 任一匹配则视为旧版本。"""
+    """三级去重：variant_url / version_code / sha256 任一匹配则视为旧版本。
+
+    例外：同一 version_code 但旧记录是 BUNDLE 而新变体是 APK，视为更优更新。
+    """
     row = get_apk_version(apk_url)
     if row is None:
         return True
     if row["last_variant_url"] and row["last_variant_url"] == variant_url:
         return False
     if version_code is not None and row["last_version_code"] == version_code:
+        # BUNDLE 已推送，现在出了真正的 APK → 视为更优更新
+        if variant_type == "APK" and row["last_type"] == "BUNDLE":
+            return True
         return False
     if row["last_sha256"] and row["last_sha256"] == sha256:
         return False
