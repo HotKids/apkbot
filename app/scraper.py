@@ -371,6 +371,31 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
 
 
 # ---------------------------------------------------------------------------
+# 包名 → APKMirror URL 解析
+# ---------------------------------------------------------------------------
+
+def resolve_package_to_apkmirror_url(session: requests.Session, package_name: str) -> Optional[str]:
+    """通过包名搜索 APKMirror，返回该应用的 base URL。"""
+    search_url = f"{BASE_URL}/?searchtype=app&s={package_name}"
+    r = session_get(session, search_url)
+    # 1. 直接重定向到应用主页
+    if re.match(r"^https?://(www\.)?apkmirror\.com/apk/[^/]+/[^/]+/?$", r.url):
+        return r.url
+    # 2. 搜索结果页中提取
+    soup = BeautifulSoup(r.text, "lxml")
+    for a in soup.select("a.fontBlack"):
+        href = a.get("href", "")
+        if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
+            return urljoin(BASE_URL, href)
+    # 3. 降级：全页搜索
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
+            return urljoin(BASE_URL, href)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 文件清理
 # ---------------------------------------------------------------------------
 

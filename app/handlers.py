@@ -30,6 +30,7 @@ from scraper import (
     cleanup_after_push,
     new_session,
     resolve_and_download,
+    resolve_package_to_apkmirror_url,
     scrape_and_pick,
 )
 from selector import Variant
@@ -210,12 +211,62 @@ def handle_sub(message: Message):
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        bot.reply_to(message, "用法：/sub https://www.apkmirror.com/apk/...")
+        bot.reply_to(
+            message,
+            "用法：/sub &lt;链接或包名&gt;\n\n支持以下格式：\n"
+            "1. <b>APKMirror 链接</b>\n"
+            "2. <b>Google Play 链接</b>\n"
+            "3. <b>应用包名</b>（如 <code>com.android.chrome</code>）",
+        )
         return
-    url = parts[1].strip()
-    if not re.match(r"^https?://(www\.)?apkmirror\.com/apk/", url):
-        bot.reply_to(message, "URL 格式不对，需以 https://www.apkmirror.com/apk/ 开头。")
-        return
+
+    input_str = parts[1].strip()
+    url = None
+
+    if re.match(r"^https?://(www\.)?apkmirror\.com/apk/", input_str):
+        url = input_str
+    else:
+        package_name = None
+        if "play.google.com" in input_str:
+            m = re.search(r"[?&]id=([a-zA-Z0-9_.]+)", input_str)
+            if m:
+                package_name = m.group(1)
+        elif re.match(r"^[a-zA-Z0-9_.]+$", input_str):
+            package_name = input_str
+
+        if package_name:
+            status_msg = bot.reply_to(message, f"正在通过包名 <code>{html.escape(package_name)}</code> 搜索 APKMirror…")
+            try:
+                session = new_session()
+                mapped_url = resolve_package_to_apkmirror_url(session, package_name)
+                if not mapped_url:
+                    bot.edit_message_text(
+                        f"未能在 APKMirror 找到包名 <code>{html.escape(package_name)}</code> 对应的应用。",
+                        message.chat.id, status_msg.message_id,
+                        parse_mode="HTML",
+                    )
+                    return
+                url = mapped_url
+                bot.edit_message_text(
+                    f"解析成功：\n<code>{html.escape(url)}</code>",
+                    message.chat.id, status_msg.message_id,
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.exception("解析包名失败")
+                bot.edit_message_text(
+                    f"解析包名时发生错误：{html.escape(str(e))}",
+                    message.chat.id, status_msg.message_id,
+                    parse_mode="HTML",
+                )
+                return
+        else:
+            bot.reply_to(message, "无法识别的输入格式。请提供 APKMirror 链接、Google Play 链接或应用包名。")
+            return
+
+    # URL 标准化：去除查询参数，统一加尾斜杠
+    url = url.split("?")[0].rstrip("/") + "/"
+
     added = add_subscription(message.chat.id, url)
     if not added:
         bot.reply_to(message, f"已在订阅该应用：\n<code>{html.escape(url)}</code>")
