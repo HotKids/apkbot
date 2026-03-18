@@ -20,6 +20,7 @@ DOWNLOAD_DIR: Path = Path(os.getenv("DOWNLOAD_DIR", "/data/downloads"))
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "60"))
 CHECK_INTERVAL: int = int(os.getenv("CHECK_INTERVAL", "60"))  # 轮询间隔（分钟）
+LOCAL_BOT_API_URL: str = os.getenv("LOCAL_BOT_API_URL", "")   # 本地 Bot API 服务器，如 http://telegram-bot-api:8081
 
 # ---------- 启动校验 ----------
 _missing = []

@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import telebot
 from telebot import TeleBot
 from telebot.types import Message
 
-from config import BOT_TOKEN, CHECK_INTERVAL, OWNER_ID
+from config import BOT_TOKEN, CHECK_INTERVAL, LOCAL_BOT_API_URL, OWNER_ID
 from database import (
     add_subscription,
     add_to_whitelist,
@@ -36,6 +37,9 @@ from scraper import (
 from selector import Variant
 
 logger = logging.getLogger("apkmirror-bot")
+
+if LOCAL_BOT_API_URL:
+    telebot.apihelper.API_URL = LOCAL_BOT_API_URL + "/bot{0}/{1}"
 
 bot = TeleBot(BOT_TOKEN, parse_mode="HTML")
 check_lock = threading.Lock()
