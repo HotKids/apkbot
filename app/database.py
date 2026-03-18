@@ -2,7 +2,6 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from config import DB_PATH
@@ -29,83 +28,180 @@ def init_db() -> None:
     with db_lock, db_conn() as conn:
         conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS settings (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS whitelist (
+                user_id    INTEGER PRIMARY KEY,
+                added_at   TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS state (
-                id              INTEGER PRIMARY KEY CHECK (id = 1),
-                last_release_url    TEXT,
-                last_variant_url    TEXT,
-                last_version_name   TEXT,
-                last_version_code   INTEGER,
-                last_sha256         TEXT,
-                last_checked_at     TEXT,
-                last_pushed_at      TEXT,
-                last_status         TEXT,
-                last_error          TEXT
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id    INTEGER NOT NULL,
+                apk_url    TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(chat_id, apk_url)
             );
 
+            CREATE TABLE IF NOT EXISTS apk_versions (
+                apk_url           TEXT PRIMARY KEY,
+                last_variant_url  TEXT,
+                last_version_name TEXT,
+                last_version_code INTEGER,
+                last_sha256       TEXT,
+                last_checked_at   TEXT,
+                last_pushed_at    TEXT
+            );
             """
         )
 
 
-def get_setting(key: str) -> Optional[str]:
+# ---------------------------------------------------------------------------
+# 白名单
+# ---------------------------------------------------------------------------
+
+def add_to_whitelist(user_id: int) -> bool:
+    """添加用户到白名单，返回 True 表示新增，False 表示已存在。"""
     with db_lock, db_conn() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-        return row[0] if row else None
+        try:
+            conn.execute(
+                "INSERT INTO whitelist(user_id, added_at) VALUES(?, ?)",
+                (user_id, _now_iso()),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            return False
 
 
-def set_setting(key: str, value: str) -> None:
+def remove_from_whitelist(user_id: int) -> bool:
+    """从白名单移除，返回 True 表示成功，False 表示不存在。"""
     with db_lock, db_conn() as conn:
-        conn.execute(
-            "INSERT INTO settings(key, value) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, value),
+        cur = conn.execute("DELETE FROM whitelist WHERE user_id = ?", (user_id,))
+        return cur.rowcount > 0
+
+
+def get_whitelist() -> list[int]:
+    with db_lock, db_conn() as conn:
+        rows = conn.execute(
+            "SELECT user_id FROM whitelist ORDER BY added_at"
+        ).fetchall()
+        return [r["user_id"] for r in rows]
+
+
+def is_in_whitelist(user_id: int) -> bool:
+    with db_lock, db_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM whitelist WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return row is not None
+
+
+# ---------------------------------------------------------------------------
+# 订阅
+# ---------------------------------------------------------------------------
+
+def add_subscription(chat_id: int, apk_url: str) -> bool:
+    """添加订阅，返回 True 表示新增，False 表示已存在。"""
+    with db_lock, db_conn() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO subscriptions(chat_id, apk_url, created_at) VALUES(?, ?, ?)",
+                (chat_id, apk_url, _now_iso()),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def remove_subscription(chat_id: int, apk_url: str) -> bool:
+    """取消指定订阅，返回 True 表示成功，False 表示不存在。"""
+    with db_lock, db_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM subscriptions WHERE chat_id = ? AND apk_url = ?",
+            (chat_id, apk_url),
         )
+        return cur.rowcount > 0
 
 
-def get_apk_url() -> Optional[str]:
-    """返回当前监控地址（由 /sub 命令配置，存储在 DB）。"""
-    return get_setting("apk_url") or None
-
-
-def get_state() -> Optional[sqlite3.Row]:
+def remove_all_subscriptions(chat_id: int) -> int:
+    """取消该用户所有订阅，返回删除条数。"""
     with db_lock, db_conn() as conn:
-        return conn.execute("SELECT * FROM state WHERE id = 1").fetchone()
+        cur = conn.execute(
+            "DELETE FROM subscriptions WHERE chat_id = ?", (chat_id,)
+        )
+        return cur.rowcount
 
 
-def update_state(**kwargs) -> None:
-    """UPSERT state 行（id=1）。只更新传入的字段。"""
+def get_subscriptions(chat_id: int) -> list[str]:
+    """返回该用户的所有订阅 URL。"""
+    with db_lock, db_conn() as conn:
+        rows = conn.execute(
+            "SELECT apk_url FROM subscriptions WHERE chat_id = ? ORDER BY created_at",
+            (chat_id,),
+        ).fetchall()
+        return [r["apk_url"] for r in rows]
+
+
+def get_all_subscribed_urls() -> list[str]:
+    """返回所有有订阅者的 URL（去重）。"""
+    with db_lock, db_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT apk_url FROM subscriptions ORDER BY apk_url"
+        ).fetchall()
+        return [r["apk_url"] for r in rows]
+
+
+def get_subscribers(apk_url: str) -> list[int]:
+    """返回订阅该 URL 的所有 chat_id。"""
+    with db_lock, db_conn() as conn:
+        rows = conn.execute(
+            "SELECT chat_id FROM subscriptions WHERE apk_url = ? ORDER BY created_at",
+            (apk_url,),
+        ).fetchall()
+        return [r["chat_id"] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# APK 版本状态
+# ---------------------------------------------------------------------------
+
+def get_apk_version(apk_url: str) -> Optional[sqlite3.Row]:
+    with db_lock, db_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM apk_versions WHERE apk_url = ?", (apk_url,)
+        ).fetchone()
+
+
+def update_apk_version(apk_url: str, **kwargs) -> None:
+    """UPSERT apk_versions 行，仅更新传入的字段。"""
     if not kwargs:
         return
-    kwargs["id"] = 1
-    cols = ", ".join(kwargs.keys())
-    placeholders = ", ".join("?" for _ in kwargs)
-    updates = ", ".join(f"{k}=excluded.{k}" for k in kwargs if k != "id")
+    kwargs["apk_url"] = apk_url
+    cols = list(kwargs.keys())
+    placeholders = ", ".join(f":{c}" for c in cols)
+    updates = ", ".join(
+        f"{c} = excluded.{c}" for c in cols if c != "apk_url"
+    )
     sql = (
-        f"INSERT INTO state ({cols}) VALUES ({placeholders}) "
-        f"ON CONFLICT(id) DO UPDATE SET {updates}"
+        f"INSERT INTO apk_versions({', '.join(cols)}) VALUES({placeholders}) "
+        f"ON CONFLICT(apk_url) DO UPDATE SET {updates}"
     )
     with db_lock, db_conn() as conn:
-        conn.execute(sql, list(kwargs.values()))
+        conn.execute(sql, kwargs)
 
 
-
-def is_already_pushed(
+def is_new_version(
+    apk_url: str,
     variant_url: str,
     version_code: Optional[int],
     sha256: str,
 ) -> bool:
-    """三级去重：variant_url → version_code → sha256。"""
-    state = get_state()
-    if not state:
+    """三级去重：variant_url / version_code / sha256 任一匹配则视为旧版本。"""
+    row = get_apk_version(apk_url)
+    if row is None:
+        return True
+    if row["last_variant_url"] and row["last_variant_url"] == variant_url:
         return False
-    if state["last_variant_url"] and state["last_variant_url"] == variant_url:
-        return True
-    if version_code and state["last_version_code"] and state["last_version_code"] == version_code:
-        return True
-    if state["last_sha256"] and state["last_sha256"] == sha256:
-        return True
-    return False
+    if version_code is not None and row["last_version_code"] == version_code:
+        return False
+    if row["last_sha256"] and row["last_sha256"] == sha256:
+        return False
+    return True

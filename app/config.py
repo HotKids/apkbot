@@ -24,8 +24,6 @@ USER_AGENT = (
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
 _owner_raw = os.getenv("OWNER_ID", "").strip()
 OWNER_ID: int = int(_owner_raw) if _owner_raw else 0
-_chat_raw = os.getenv("TARGET_CHAT_ID", "").strip()
-TARGET_CHAT_ID: int = int(_chat_raw) if _chat_raw else 0
 CRON_SCHEDULE: str = os.getenv("CRON_SCHEDULE", "").strip()
 
 # ---------- 可选：基础 ----------
@@ -59,8 +57,6 @@ if not BOT_TOKEN:
     _missing.append("BOT_TOKEN")
 if not OWNER_ID:
     _missing.append("OWNER_ID")
-if not TARGET_CHAT_ID:
-    _missing.append("TARGET_CHAT_ID")
 if not CRON_SCHEDULE:
     _missing.append("CRON_SCHEDULE")
 if _missing:
