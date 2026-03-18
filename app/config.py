@@ -21,10 +21,6 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "60"))
 CHECK_INTERVAL: int = int(os.getenv("CHECK_INTERVAL", "60"))  # 轮询间隔（分钟）
 
-# ---------- 可选：文件清理 ----------
-DELETE_AFTER_PUSH: bool = os.getenv("DELETE_AFTER_PUSH", "false").lower() == "true"
-MAX_KEEP_FILES: int = int(os.getenv("MAX_KEEP_FILES", "5"))
-
 # ---------- 启动校验 ----------
 _missing = []
 if not BOT_TOKEN:

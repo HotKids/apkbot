@@ -115,7 +115,7 @@ git pull
 docker compose up -d --build
 ```
 
-数据库和下载文件保存在 `./data/`，升级不影响历史记录。
+数据库保存在 `./data/`，升级不影响历史记录。
 
 ---
 
@@ -131,9 +131,10 @@ docker compose down
 
 ```
 ./data/
-  ├── app.db        # SQLite（订阅、白名单、版本状态）
-  └── downloads/    # 下载的 APK 文件
+  └── app.db        # SQLite（订阅、白名单、版本状态）
 ```
+
+APK 文件推送成功后自动删除。
 
 ---
 
@@ -143,7 +144,7 @@ docker compose down
 先由任一白名单用户发送 `/sub <url>` 添加订阅。
 
 **Q：`/check` 提示"没有 variant 通过过滤条件"**
-检查 `REQUIRED_SIGNATURES` / `REQUIRED_ARCHITECTURES` 是否过严，或暂时清空这些参数再测试。
+APKMirror 页面可能无法解析到 variant，查看日志获取具体错误信息。
 
 **Q：其他用户发消息 Bot 无响应**
 正常现象——非白名单用户会被静默丢弃。请 OWNER 使用 `/adduser <user_id>` 授权。

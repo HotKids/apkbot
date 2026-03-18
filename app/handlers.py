@@ -8,7 +8,7 @@ from typing import Optional
 from telebot import TeleBot
 from telebot.types import Message
 
-from config import BOT_TOKEN, CRON_SCHEDULE, OWNER_ID
+from config import BOT_TOKEN, CHECK_INTERVAL, OWNER_ID
 from database import (
     add_subscription,
     add_to_whitelist,
@@ -287,7 +287,7 @@ def handle_status(message: Message):
         return
     urls = get_all_subscribed_urls()
     total_subs = sum(len(get_subscribers(u)) for u in urls)
-    lines = ["<b>Bot 状态</b>", f"定时计划：<code>{CRON_SCHEDULE}</code>", f"订阅 URL 数：<code>{len(urls)}</code>", f"订阅人次：<code>{total_subs}</code>"]
+    lines = ["<b>Bot 状态</b>", f"轮询间隔：<code>{CHECK_INTERVAL}m</code>", f"订阅 URL 数：<code>{len(urls)}</code>", f"订阅人次：<code>{total_subs}</code>"]
     for url in urls:
         ver = get_apk_version(url)
         app_label = html.escape(url.rstrip("/").split("/")[-1])

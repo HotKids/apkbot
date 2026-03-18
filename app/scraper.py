@@ -12,9 +12,7 @@ from bs4 import BeautifulSoup, Tag
 
 from config import (
     BASE_URL,
-    DELETE_AFTER_PUSH,
     DOWNLOAD_DIR,
-    MAX_KEEP_FILES,
     REQUEST_TIMEOUT,
     USER_AGENT,
 )
@@ -361,25 +359,9 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
 # ---------------------------------------------------------------------------
 
 def cleanup_after_push(apk_path: Path) -> None:
-    """推送成功后按配置清理 APK 文件。"""
-    if DELETE_AFTER_PUSH:
-        try:
-            apk_path.unlink(missing_ok=True)
-            logger.info("已删除推送后的 APK：%s", apk_path.name)
-        except OSError:
-            logger.exception("删除 APK 失败：%s", apk_path)
-        return
-    if MAX_KEEP_FILES > 0:
-        _trim_download_dir(MAX_KEEP_FILES)
-
-
-def _trim_download_dir(keep: int) -> None:
-    """按修改时间排序，保留最新 keep 个 .apk，删除旧文件。"""
-    apks = sorted(DOWNLOAD_DIR.glob("*.apk"), key=lambda p: p.stat().st_mtime)
-    to_delete = apks[:-keep] if len(apks) > keep else []
-    for path in to_delete:
-        try:
-            path.unlink()
-            logger.info("已删除旧 APK：%s", path.name)
-        except OSError:
-            logger.exception("删除旧 APK 失败：%s", path)
+    """推送成功后删除 APK 文件。"""
+    try:
+        apk_path.unlink(missing_ok=True)
+        logger.info("已删除 APK：%s", apk_path.name)
+    except OSError:
+        logger.exception("删除 APK 失败：%s", apk_path)
