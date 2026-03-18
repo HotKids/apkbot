@@ -351,6 +351,52 @@ def _extract_post_id(soup: BeautifulSoup, html: str) -> Optional[str]:
     return None
 
 
+def _follow_html_redirect(
+    session: requests.Session, url: str, referer: str
+) -> Optional[str]:
+    """请求 url；若返回二进制直接用该 URL；若返回 HTML，在里面查找真实 CDN 链接。
+    找到 CDN URL 则返回；找不到则返回 None（让调用方决定下一步）。"""
+    try:
+        r = session.get(
+            url, timeout=20, allow_redirects=True,
+            headers={"Referer": referer, "Accept": "*/*"},
+        )
+        ct = r.headers.get("Content-Type", "")
+        if "text/html" not in ct:
+            # 已经是二进制内容（APK / ZIP），直接用该 URL 下载
+            return url
+
+        # download.php 返回了 HTML——在里面寻找真实文件 URL
+        h = r.text
+        # 1. window.location / location.href = "..."
+        m = re.search(
+            r'(?:window\.location|location\.href)\s*=\s*["\']([^"\']+)["\']', h
+        )
+        if m:
+            return urljoin(BASE_URL, m.group(1))
+        # 2. <meta http-equiv="refresh" content="...url=...">
+        soup2 = BeautifulSoup(h, "lxml")
+        for meta in soup2.select("meta[http-equiv]"):
+            if "refresh" in (meta.get("http-equiv") or "").lower():
+                m = re.search(r"url=([^\s;,]+)", meta.get("content", ""), re.I)
+                if m:
+                    return urljoin(BASE_URL, m.group(1).strip("'\""))
+        # 3. <a href="...apk...">
+        for a in soup2.select("a[href]"):
+            href = a.get("href", "")
+            if re.search(r"\.(apk|apkm|xapk)(\?|$)", href, re.I):
+                return urljoin(BASE_URL, href)
+        # 4. 任意含 .apk 的 https:// 链接
+        m = re.search(r'(https?://[^\s"\'<>]+\.apk(?:\?[^\s"\'<>]*)?)', h)
+        if m:
+            return m.group(1)
+        # 找不到：打出前 1500 字符供分析
+        logger.debug("download.php 返回 HTML，前1500字符：%s", h[:1500])
+    except Exception as e:
+        logger.debug("_follow_html_redirect %s 失败：%s", url, e)
+    return None
+
+
 def _extract_js_str(html: str, key: str) -> Optional[str]:
     """从页面内嵌 JS 中提取指定 key 的字符串/数字值。"""
     for pattern in [
@@ -405,11 +451,15 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
         post_id = _extract_post_id(soup, html)
         if post_id:
             logger.debug("Step5 post_id=%s key=%s", post_id, dl_key)
-            dl_url = (
+            dl_url = urljoin(
+                BASE_URL,
                 f"/wp-content/themes/APKMirror/download.php"
-                f"?id={post_id}&key={dl_key}{forcebase}"
+                f"?id={post_id}&key={dl_key}{forcebase}",
             )
-            return urljoin(BASE_URL, dl_url)
+            # 验证：download.php 可能需要 Referer；若返回 HTML 则从里面提取 CDN URL
+            resolved = _follow_html_redirect(session, dl_url, referer=download_page_url)
+            if resolved:
+                return resolved
 
     # 6. 从页面内嵌 JS 变量提取 nonce + id，调用 WordPress AJAX 端点
     nonce = _extract_js_str(html, "nonce")
@@ -469,6 +519,18 @@ def download_file(session: requests.Session, file_url: str, fallback_name: str) 
         # 终极防御：如果服务器返回的是 HTML 网页，直接报错拦截
         content_type = r.headers.get("Content-Type", "").lower()
         if "text/html" in content_type:
+            # 读取前 2000 字符用于诊断（页面内容可能揭示失败原因）
+            html_preview = ""
+            try:
+                for chunk in r.iter_content(2000):
+                    html_preview = chunk.decode("utf-8", errors="replace")[:2000]
+                    break
+            except Exception:
+                pass
+            logger.error(
+                "download_file 拦截：URL=%s 返回 HTML\n  前2000字符：%s",
+                file_url, html_preview,
+            )
             raise RuntimeError(
                 f"下载失败：获取到了 HTML 网页而非安装包 (Content-Type: {content_type})。"
                 "大概率触发了反爬或抓取了错误链接。"
