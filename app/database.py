@@ -1,12 +1,17 @@
 import sqlite3
 import threading
-import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
-from config import AUTO_INIT_OWNER, DB_PATH
+from config import DB_PATH
 
 db_lock = threading.Lock()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @contextmanager
@@ -20,107 +25,85 @@ def db_conn():
         conn.close()
 
 
-def init_db():
+def init_db() -> None:
     with db_lock, db_conn() as conn:
         conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS state (
+                id              INTEGER PRIMARY KEY CHECK (id = 1),
+                last_release_url    TEXT,
+                last_variant_url    TEXT,
+                last_version_name   TEXT,
+                last_version_code   INTEGER,
+                last_sha256         TEXT,
+                last_checked_at     TEXT,
+                last_pushed_at      TEXT,
+                last_status         TEXT,
+                last_error          TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS channels (
-                chat_id INTEGER PRIMARY KEY,
-                title TEXT,
-                username TEXT,
-                bound_by INTEGER NOT NULL,
-                created_at INTEGER NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1
-            );
-
-            CREATE TABLE IF NOT EXISTS releases (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                version TEXT NOT NULL,
-                variant_url TEXT NOT NULL UNIQUE,
-                file_name TEXT,
-                sha256 TEXT,
-                created_at INTEGER NOT NULL
+            CREATE TABLE IF NOT EXISTS downloads (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_name   TEXT NOT NULL,
+                file_path   TEXT NOT NULL,
+                size_bytes  INTEGER,
+                sha256      TEXT,
+                source_url  TEXT,
+                created_at  TEXT NOT NULL
             );
             """
         )
 
 
-def get_setting(key: str) -> Optional[str]:
+def get_state() -> Optional[sqlite3.Row]:
     with db_lock, db_conn() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-        return row[0] if row else None
+        return conn.execute("SELECT * FROM state WHERE id = 1").fetchone()
 
 
-def set_setting(key: str, value: str) -> None:
+def update_state(**kwargs) -> None:
+    """UPSERT state 行（id=1）。只更新传入的字段。"""
+    if not kwargs:
+        return
+    kwargs["id"] = 1
+    cols = ", ".join(kwargs.keys())
+    placeholders = ", ".join("?" for _ in kwargs)
+    updates = ", ".join(f"{k}=excluded.{k}" for k in kwargs if k != "id")
+    sql = (
+        f"INSERT INTO state ({cols}) VALUES ({placeholders}) "
+        f"ON CONFLICT(id) DO UPDATE SET {updates}"
+    )
+    with db_lock, db_conn() as conn:
+        conn.execute(sql, list(kwargs.values()))
+
+
+def save_download(
+    file_name: str,
+    file_path: str,
+    size_bytes: int,
+    sha256: str,
+    source_url: str,
+) -> None:
     with db_lock, db_conn() as conn:
         conn.execute(
-            "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, value),
+            "INSERT INTO downloads(file_name, file_path, size_bytes, sha256, source_url, created_at) "
+            "VALUES(?, ?, ?, ?, ?, ?)",
+            (file_name, file_path, size_bytes, sha256, source_url, _now_iso()),
         )
 
 
-def owner_id() -> Optional[int]:
-    value = get_setting("owner_id")
-    return int(value) if value else None
-
-
-def ensure_owner(user_id: int) -> bool:
-    current = owner_id()
-    if current:
-        return current == user_id
-    if AUTO_INIT_OWNER:
-        set_setting("owner_id", str(user_id))
+def is_already_pushed(
+    variant_url: str,
+    version_code: Optional[int],
+    sha256: str,
+) -> bool:
+    """三级去重：variant_url → version_code → sha256。"""
+    state = get_state()
+    if not state:
+        return False
+    if state["last_variant_url"] and state["last_variant_url"] == variant_url:
+        return True
+    if version_code and state["last_version_code"] and state["last_version_code"] == version_code:
+        return True
+    if state["last_sha256"] and state["last_sha256"] == sha256:
         return True
     return False
-
-
-def is_owner(user_id: int) -> bool:
-    current = owner_id()
-    return current is not None and current == user_id
-
-
-def add_channel(chat_id: int, title: str, username: Optional[str], bound_by: int):
-    with db_lock, db_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO channels(chat_id, title, username, bound_by, created_at, active)
-            VALUES(?, ?, ?, ?, ?, 1)
-            ON CONFLICT(chat_id) DO UPDATE SET
-                title=excluded.title,
-                username=excluded.username,
-                bound_by=excluded.bound_by,
-                active=1
-            """,
-            (chat_id, title, username, bound_by, int(time.time())),
-        )
-
-
-def list_channels():
-    with db_lock, db_conn() as conn:
-        return conn.execute(
-            "SELECT chat_id, title, username, bound_by, created_at, active FROM channels WHERE active = 1 ORDER BY created_at ASC"
-        ).fetchall()
-
-
-def deactivate_channel(chat_id: int):
-    with db_lock, db_conn() as conn:
-        conn.execute("UPDATE channels SET active = 0 WHERE chat_id = ?", (chat_id,))
-
-
-def release_exists(variant_url: str) -> bool:
-    with db_lock, db_conn() as conn:
-        row = conn.execute("SELECT 1 FROM releases WHERE variant_url = ?", (variant_url,)).fetchone()
-        return row is not None
-
-
-def save_release(version: str, variant_url: str, file_name: str, sha256: str):
-    with db_lock, db_conn() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO releases(version, variant_url, file_name, sha256, created_at) VALUES(?, ?, ?, ?, ?)",
-            (version, variant_url, file_name, sha256, int(time.time())),
-        )
