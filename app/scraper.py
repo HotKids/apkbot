@@ -12,7 +12,6 @@ from bs4 import BeautifulSoup, Tag
 
 from config import (
     ALLOW_BUNDLE,
-    APK_URL,
     BASE_URL,
     DELETE_AFTER_PUSH,
     DOWNLOAD_DIR,
@@ -360,9 +359,9 @@ def score_variant(v: Variant) -> float:
     return s
 
 
-def scrape_and_pick(session: requests.Session) -> Variant:
+def scrape_and_pick(session: requests.Session, apk_url: str) -> Variant:
     """完整抓取 + 过滤 + 打分，返回最佳 Variant（未下载）。"""
-    release_url = get_release_url(session, APK_URL)
+    release_url = get_release_url(session, apk_url)
     logger.info("Release 页：%s", release_url)
     all_variants = parse_variants(session, release_url)
     logger.info("共解析 %d 个 variant", len(all_variants))

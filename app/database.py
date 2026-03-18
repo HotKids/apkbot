@@ -29,6 +29,11 @@ def init_db() -> None:
     with db_lock, db_conn() as conn:
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS state (
                 id              INTEGER PRIMARY KEY CHECK (id = 1),
                 last_release_url    TEXT,
@@ -53,6 +58,26 @@ def init_db() -> None:
             );
             """
         )
+
+
+def get_setting(key: str) -> Optional[str]:
+    with db_lock, db_conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    with db_lock, db_conn() as conn:
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+
+def get_apk_url() -> Optional[str]:
+    """返回当前监控地址（由 /sub 命令配置，存储在 DB）。"""
+    return get_setting("apk_url") or None
 
 
 def get_state() -> Optional[sqlite3.Row]:

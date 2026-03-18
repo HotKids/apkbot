@@ -9,16 +9,17 @@ from telebot.apihelper import ApiTelegramException
 from telebot.types import Message
 
 from config import (
-    APK_URL,
     BOT_TOKEN,
     CRON_SCHEDULE,
     OWNER_ID,
     TARGET_CHAT_ID,
 )
 from database import (
+    get_apk_url,
     get_state,
     is_already_pushed,
     save_download,
+    set_setting,
     update_state,
 )
 from scraper import (
@@ -88,8 +89,14 @@ def run_check(triggered_by: Optional[int] = None) -> str:
         return "已有检查任务在运行中。"
     try:
         now = _now_iso()
+        apk_url = get_apk_url()
+        if not apk_url:
+            msg = "未配置监控地址，请先发送 /sub <url>"
+            if triggered_by:
+                bot.send_message(triggered_by, msg)
+            return msg
         session = new_session()
-        variant = scrape_and_pick(session)
+        variant = scrape_and_pick(session, apk_url)
         apk_path, sha256 = resolve_and_download(session, variant)
 
         if is_already_pushed(variant.variant_url, variant.version_code, sha256):
@@ -165,7 +172,7 @@ def handle_status(message: Message):
     bot.reply_to(
         message,
         "<b>运行状态</b>\n"
-        f"目标：<code>{APK_URL}</code>\n"
+        f"目标：<code>{get_apk_url() or '未配置'}</code>\n"
         f"频道：<code>{TARGET_CHAT_ID}</code>\n"
         f"计划：<code>{CRON_SCHEDULE}</code>\n"
         f"上次检查：<code>{state['last_checked_at'] or '—'}</code>\n"
@@ -186,3 +193,19 @@ def handle_checknow(message: Message):
         kwargs={"triggered_by": message.chat.id},
         daemon=True,
     ).start()
+
+
+@bot.message_handler(commands=["sub"])
+def handle_sub(message: Message):
+    if not _require_private_owner(message):
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(message, "用法：/sub https://www.apkmirror.com/apk/...")
+        return
+    url = parts[1].strip()
+    if not url.startswith("https://www.apkmirror.com/apk/"):
+        bot.reply_to(message, "URL 格式不对，需以 https://www.apkmirror.com/apk/ 开头。")
+        return
+    set_setting("apk_url", url)
+    bot.reply_to(message, f"已设置监控地址：\n<code>{url}</code>")
