@@ -15,7 +15,7 @@ logger = logging.getLogger("apkmirror-bot")
 
 
 def scheduled_job() -> None:
-    logger.info("Scheduled check triggered")
+    logger.info("定时检查触发")
     run_check_all(triggered_by=None)
 
 
@@ -29,7 +29,7 @@ def main() -> None:
         replace_existing=True,
     )
     scheduler.start()
-    logger.info("Bot started. Check interval: %dm (%s)", config.CHECK_INTERVAL, config.TZ)
+    logger.info("Bot 已启动，检查间隔：%dm（%s）", config.CHECK_INTERVAL, config.TZ)
     bot.infinity_polling(timeout=30, long_polling_timeout=30)
 
 

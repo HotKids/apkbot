@@ -3,7 +3,6 @@ import logging
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +21,7 @@ from database import (
     get_whitelist,
     is_in_whitelist,
     is_new_version,
+    now_iso,
     remove_all_subscriptions,
     remove_from_whitelist,
     remove_subscription,
@@ -50,10 +50,6 @@ def _safe_send(chat_id: int, text: str, **kwargs) -> None:
         bot.send_message(chat_id, text, **kwargs)
     except Exception:
         logger.warning("发送消息失败：chat_id=%s", chat_id)
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _is_allowed(message: Message) -> bool:
@@ -106,7 +102,8 @@ def _send_apk_to_user(chat_id: int, variant: Variant, apk_path: Path, sha256: st
         bot.send_document(
             chat_id,
             f,
-            visible_file_name=apk_path.name,
+            visible_file_name=re.sub(r'\s+', "_", re.sub(r'[\\/*?:"<>|]', "_",
+                f"{variant.app_name}_{variant.release_version_name}")) + (".apkm" if variant.is_bundle else ".apk"),
             caption=caption,
             timeout=300,
         )
@@ -128,8 +125,8 @@ def _send_current_version(chat_id: int, apk_url: str) -> None:
                 last_version_code=variant.version_code,
                 last_sha256=sha256,
                 last_type=variant.type,
-                last_checked_at=_now_iso(),
-                last_pushed_at=_now_iso(),
+                last_checked_at=now_iso(),
+                last_pushed_at=now_iso(),
             )
     except Exception as e:
         logger.exception("首次推送失败：chat_id=%s url=%s", chat_id, apk_url)
@@ -148,7 +145,7 @@ def _check_single_url(apk_url: str) -> str:
         apk_path, sha256 = resolve_and_download(session, variant)
 
         if not is_new_version(apk_url, variant.variant_url, variant.version_code, sha256, variant.type):
-            update_apk_version(apk_url, last_checked_at=_now_iso())
+            update_apk_version(apk_url, last_checked_at=now_iso())
             return f"无更新：{html.escape(apk_url.rstrip('/').split('/')[-1])}（{html.escape(variant.release_version_name)}）"
 
         subscribers = get_subscribers(apk_url)
@@ -160,7 +157,7 @@ def _check_single_url(apk_url: str) -> str:
             except Exception:
                 logger.exception("推送给 chat_id=%s 失败", sub_chat_id)
 
-        now = _now_iso()
+        now = now_iso()
         update_apk_version(
             apk_url,
             last_variant_url=variant.variant_url,
@@ -207,6 +204,72 @@ def run_check_all(triggered_by: Optional[int] = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 输入解析公共函数
+# ---------------------------------------------------------------------------
+
+def _resolve_to_apkmirror_url(message: Message, input_str: str) -> Optional[str]:
+    """将用户输入解析为标准化的 APKMirror URL。解析失败时主动回复错误消息并返回 None。"""
+    if re.match(r"^https?://(www\.)?apkmirror\.com/apk/", input_str):
+        return input_str.split("?")[0].rstrip("/") + "/"
+
+    package_name = None
+    if "play.google.com" in input_str:
+        m = re.search(r"[?&]id=([a-zA-Z0-9_.]+)", input_str)
+        if m:
+            package_name = m.group(1)
+    elif re.match(r"^[a-zA-Z0-9_.]+$", input_str):
+        package_name = input_str
+
+    if package_name:
+        status_msg = bot.reply_to(message, f"🔄 正在通过包名 <code>{html.escape(package_name)}</code> 搜索 APKMirror……")
+        try:
+            session = new_session()
+            mapped_url = resolve_package_to_apkmirror_url(session, package_name)
+            if not mapped_url:
+                bot.edit_message_text(
+                    f"❌ 未能在 APKMirror 找到包名 <code>{html.escape(package_name)}</code> 对应的应用。",
+                    message.chat.id, status_msg.message_id, parse_mode="HTML",
+                )
+                return None
+            url = mapped_url.split("?")[0].rstrip("/") + "/"
+            bot.edit_message_text(
+                f"✅ 解析成功：\n<code>{html.escape(url)}</code>",
+                message.chat.id, status_msg.message_id, parse_mode="HTML",
+            )
+            return url
+        except Exception as e:
+            logger.exception("解析包名失败")
+            bot.edit_message_text(
+                f"❌ 解析包名时发生错误：{html.escape(str(e))}",
+                message.chat.id, status_msg.message_id, parse_mode="HTML",
+            )
+            return None
+
+    bot.reply_to(message, "❌ 无法识别的输入格式。请提供 APKMirror 链接、Google Play 链接或应用包名。")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 一次性下载（不写数据库）
+# ---------------------------------------------------------------------------
+
+def _download_once(chat_id: int, apk_url: str) -> None:
+    """一次性下载并发送，不写数据库。"""
+    apk_path: Optional[Path] = None
+    try:
+        session = new_session()
+        variant = scrape_and_pick(session, apk_url)
+        apk_path, sha256 = resolve_and_download(session, variant)
+        _send_apk_to_user(chat_id, variant, apk_path, sha256)
+    except Exception as e:
+        logger.exception("一次性下载失败：chat_id=%s url=%s", chat_id, apk_url)
+        _safe_send(chat_id, f"❌ 下载失败：{html.escape(str(e))}")
+    finally:
+        if apk_path is not None:
+            cleanup_after_push(apk_path)
+
+
+# ---------------------------------------------------------------------------
 # Bot 命令处理
 # ---------------------------------------------------------------------------
 
@@ -228,51 +291,9 @@ def handle_sub(message: Message):
         return
 
     input_str = parts[1].strip()
-    url = None
-
-    if re.match(r"^https?://(www\.)?apkmirror\.com/apk/", input_str):
-        url = input_str
-    else:
-        package_name = None
-        if "play.google.com" in input_str:
-            m = re.search(r"[?&]id=([a-zA-Z0-9_.]+)", input_str)
-            if m:
-                package_name = m.group(1)
-        elif re.match(r"^[a-zA-Z0-9_.]+$", input_str):
-            package_name = input_str
-
-        if package_name:
-            status_msg = bot.reply_to(message, f"🔄 正在通过包名 <code>{html.escape(package_name)}</code> 搜索 APKMirror……")
-            try:
-                session = new_session()
-                mapped_url = resolve_package_to_apkmirror_url(session, package_name)
-                if not mapped_url:
-                    bot.edit_message_text(
-                        f"❌ 未能在 APKMirror 找到包名 <code>{html.escape(package_name)}</code> 对应的应用。",
-                        message.chat.id, status_msg.message_id,
-                        parse_mode="HTML",
-                    )
-                    return
-                url = mapped_url
-                bot.edit_message_text(
-                    f"✅ 解析成功：\n<code>{html.escape(url)}</code>",
-                    message.chat.id, status_msg.message_id,
-                    parse_mode="HTML",
-                )
-            except Exception as e:
-                logger.exception("解析包名失败")
-                bot.edit_message_text(
-                    f"❌ 解析包名时发生错误：{html.escape(str(e))}",
-                    message.chat.id, status_msg.message_id,
-                    parse_mode="HTML",
-                )
-                return
-        else:
-            bot.reply_to(message, "❌ 无法识别的输入格式。请提供 APKMirror 链接、Google Play 链接或应用包名。")
-            return
-
-    # URL 标准化：去除查询参数，统一加尾斜杠
-    url = url.split("?")[0].rstrip("/") + "/"
+    url = _resolve_to_apkmirror_url(message, input_str)
+    if url is None:
+        return
 
     added = add_subscription(message.chat.id, url)
     if not added:
@@ -285,6 +306,33 @@ def handle_sub(message: Message):
         args=(message.chat.id, url),
         daemon=True,
     ).start()
+
+
+@bot.message_handler(commands=["dl"])
+def handle_dl(message: Message):
+    if not _require_allowed(message):
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(
+            message,
+            "用法：/dl &lt;链接或包名&gt;\n\n"
+            "一次性下载并发送 APK，不创建订阅。支持以下格式：\n"
+            "1. <b>APKMirror 链接</b>\n"
+            "   <code>https://www.apkmirror.com/apk/…</code>\n"
+            "2. <b>Google Play 链接</b>\n"
+            "   <code>https://play.google.com/store/apps/details?id=…</code>\n"
+            "3. <b>应用包名</b>（如 <code>com.android.chrome</code>）",
+        )
+        return
+
+    input_str = parts[1].strip()
+    url = _resolve_to_apkmirror_url(message, input_str)
+    if url is None:
+        return
+
+    bot.reply_to(message, f"🔄 正在下载，请稍等……\n<code>{html.escape(url)}</code>")
+    threading.Thread(target=_download_once, args=(message.chat.id, url), daemon=True).start()
 
 
 @bot.message_handler(commands=["unsub"])
