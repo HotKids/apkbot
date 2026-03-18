@@ -325,7 +325,7 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
     raise RuntimeError("无法找到 APK 最终下载链接")
 
 
-def download_file(session: requests.Session, file_url: str) -> Path:
+def download_file(session: requests.Session, file_url: str, fallback_name: str) -> Path:
     with session.get(file_url, stream=True, timeout=300, allow_redirects=True) as r:
         r.raise_for_status()
         filename = None
@@ -334,7 +334,8 @@ def download_file(session: requests.Session, file_url: str) -> Path:
         if m:
             filename = m.group(1).strip()
         if not filename:
-            filename = file_url.split("/")[-1].split("?")[0] or f"apk_{int(time.time())}.apk"
+            url_name = file_url.split("/")[-1].split("?")[0]
+            filename = url_name if url_name and url_name.lower() != "download" else fallback_name
         out_path = DOWNLOAD_DIR / filename
         with out_path.open("wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 512):
@@ -358,7 +359,11 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
     final_url = resolve_final_apk_url(session, download_page)
     variant.final_download_url = final_url
     logger.info("开始下载：%s", final_url)
-    apk_path = download_file(session, final_url)
+    raw_name = f"{variant.app_name}_{variant.variant_label}"
+    safe_name = re.sub(r'\s+', "_", re.sub(r'[\\/*?:"<>|]', "_", raw_name))
+    ext = ".apkm" if variant.is_bundle else ".apk"
+    fallback_name = f"{safe_name}{ext}"
+    apk_path = download_file(session, final_url, fallback_name)
     file_hash = sha256_file(apk_path)
     logger.info("下载完成：%s (%.2f MB, sha256=%s...)",
                 apk_path.name, apk_path.stat().st_size / 1024 / 1024, file_hash[:12])
