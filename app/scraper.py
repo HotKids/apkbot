@@ -310,32 +310,49 @@ def scrape_and_pick(session: requests.Session, apk_url: str) -> Variant:
 def resolve_download_page(session: requests.Session, variant_url: str) -> str:
     r = session_get(session, variant_url)
     soup = BeautifulSoup(r.text, "lxml")
-    for a in soup.select("a[href]"):
-        text = a.get_text(" ", strip=True).lower()
-        href = a.get("href", "")
-        if "download apk" in text or "see available downloads" in text:
-            return urljoin(BASE_URL, href)
-    for a in soup.select('a[href*="/download/"]'):
+
+    # 1. 精准匹配 APKMirror 的主下载按钮
+    download_btn = soup.select_one("a.downloadButton")
+    if download_btn and download_btn.get("href"):
+        return urljoin(BASE_URL, download_btn.get("href"))
+
+    # 2. 备用：寻找带有 /download/?key= 的链接
+    for a in soup.select('a[href*="/download/?key="]'):
         return urljoin(BASE_URL, a.get("href"))
-    raise RuntimeError("无法找到下载页链接")
+
+    raise RuntimeError("无法在 Variant 页面找到下载页入口")
 
 
 def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> str:
     r = session_get(session, download_page_url)
     soup = BeautifulSoup(r.text, "lxml")
+
+    # 1. 真正的直链通常带有 download.php?id= (APKMirror 真实的下载网关)
+    for a in soup.select('a[href*="download.php?id="]'):
+        return urljoin(BASE_URL, a.get("href"))
+
+    # 2. 寻找 "click here" 提示中的链接
     for a in soup.select("a[href]"):
         text = a.get_text(" ", strip=True).lower()
         href = a.get("href", "")
-        if "download apk" in text or href.endswith(".apk") or href.endswith(".apkm"):
+        if "here" in text and "key=" in href:
             return urljoin(BASE_URL, href)
-    for a in soup.select('a[href*="/wp-content/"]'):
-        return urljoin(BASE_URL, a.get("href"))
-    raise RuntimeError("无法找到 APK 最终下载链接")
+
+    raise RuntimeError("无法在中间页解析出真实的 APK 直链，可能是页面结构变更或触发了反爬")
 
 
 def download_file(session: requests.Session, file_url: str, fallback_name: str) -> Path:
     with session.get(file_url, stream=True, timeout=300, allow_redirects=True) as r:
         r.raise_for_status()
+
+        # 终极防御：如果服务器返回的是 HTML 网页，直接报错拦截
+        content_type = r.headers.get("Content-Type", "").lower()
+        if "text/html" in content_type:
+            raise RuntimeError(
+                f"下载失败：获取到了 HTML 网页而非安装包 (Content-Type: {content_type})。"
+                "大概率触发了反爬或抓取了错误链接。"
+            )
+
         filename = None
         cd = r.headers.get("Content-Disposition", "")
         m = re.search(r'filename="?([^";]+)"?', cd)
