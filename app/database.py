@@ -9,7 +9,7 @@ from config import DB_PATH
 db_lock = threading.Lock()
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -70,7 +70,7 @@ def add_to_whitelist(user_id: int) -> bool:
         try:
             conn.execute(
                 "INSERT INTO whitelist(user_id, added_at) VALUES(?, ?)",
-                (user_id, _now_iso()),
+                (user_id, now_iso()),
             )
             return True
         except sqlite3.IntegrityError:
@@ -110,7 +110,7 @@ def add_subscription(chat_id: int, apk_url: str) -> bool:
         try:
             conn.execute(
                 "INSERT INTO subscriptions(chat_id, apk_url, created_at) VALUES(?, ?, ?)",
-                (chat_id, apk_url, _now_iso()),
+                (chat_id, apk_url, now_iso()),
             )
             return True
         except sqlite3.IntegrityError:
@@ -199,7 +199,7 @@ def is_new_version(
     variant_url: str,
     version_code: Optional[int],
     sha256: str,
-    variant_type: str = "",
+    variant_type: str,
 ) -> bool:
     """三级去重：variant_url / version_code / sha256 任一匹配则视为旧版本。
 

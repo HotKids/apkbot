@@ -3,7 +3,6 @@ import logging
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +21,7 @@ from database import (
     get_whitelist,
     is_in_whitelist,
     is_new_version,
+    now_iso,
     remove_all_subscriptions,
     remove_from_whitelist,
     remove_subscription,
@@ -50,10 +50,6 @@ def _safe_send(chat_id: int, text: str, **kwargs) -> None:
         bot.send_message(chat_id, text, **kwargs)
     except Exception:
         logger.warning("发送消息失败：chat_id=%s", chat_id)
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _is_allowed(message: Message) -> bool:
@@ -129,8 +125,8 @@ def _send_current_version(chat_id: int, apk_url: str) -> None:
                 last_version_code=variant.version_code,
                 last_sha256=sha256,
                 last_type=variant.type,
-                last_checked_at=_now_iso(),
-                last_pushed_at=_now_iso(),
+                last_checked_at=now_iso(),
+                last_pushed_at=now_iso(),
             )
     except Exception as e:
         logger.exception("首次推送失败：chat_id=%s url=%s", chat_id, apk_url)
@@ -149,7 +145,7 @@ def _check_single_url(apk_url: str) -> str:
         apk_path, sha256 = resolve_and_download(session, variant)
 
         if not is_new_version(apk_url, variant.variant_url, variant.version_code, sha256, variant.type):
-            update_apk_version(apk_url, last_checked_at=_now_iso())
+            update_apk_version(apk_url, last_checked_at=now_iso())
             return f"无更新：{html.escape(apk_url.rstrip('/').split('/')[-1])}（{html.escape(variant.release_version_name)}）"
 
         subscribers = get_subscribers(apk_url)
@@ -161,7 +157,7 @@ def _check_single_url(apk_url: str) -> str:
             except Exception:
                 logger.exception("推送给 chat_id=%s 失败", sub_chat_id)
 
-        now = _now_iso()
+        now = now_iso()
         update_apk_version(
             apk_url,
             last_variant_url=variant.variant_url,
