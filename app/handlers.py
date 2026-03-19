@@ -366,11 +366,11 @@ def handle_dl(message: Message):
             message,
             "用法：/dl &lt;链接或包名&gt;\n\n"
             "一次性下载并发送 APK，不创建订阅。支持以下格式：\n"
-            "1. <b>APKMirror 链接</b>\n"
-            "   <code>https://www.apkmirror.com/apk/…</code>\n"
-            "2. <b>Google Play 链接</b>\n"
-            "   <code>https://play.google.com/store/apps/details?id=…</code>\n"
-            "3. <b>应用包名</b>（如 <code>com.android.chrome</code>）",
+            "APKMirror 链接：<code>https://www.apkmirror.com/apk/…</code>\n"
+            "APKPure 链接：  <code>https://apkpure.com/…</code>\n"
+            "Play Store 链接：<code>https://play.google.com/store/apps/details?id=…</code>\n"
+            "包名：          <code>com.android.chrome</code>",
+            parse_mode="HTML",
         )
         return
 
@@ -414,6 +414,12 @@ def handle_unsub(message: Message):
             bot.reply_to(message, "❌ 未找到该订阅，请检查 URL 是否正确。")
 
 
+def _app_name_from_url(url: str) -> str:
+    """从 URL 末尾路径段提取可读 App 名，如 google-play-store → Google Play Store。"""
+    seg = url.rstrip("/").split("/")[-1]
+    return seg.replace("-", " ").title()
+
+
 @bot.message_handler(commands=["list"])
 def handle_sublist(message: Message):
     if not _require_allowed(message):
@@ -422,8 +428,11 @@ def handle_sublist(message: Message):
     if not subs:
         bot.reply_to(message, "当前无订阅。使用 /sub &lt;url&gt; 添加。")
     else:
-        lines = "\n".join(f"• <code>{html.escape(s)}</code>" for s in subs)
-        bot.reply_to(message, f"当前订阅（{len(subs)} 个）：\n{lines}")
+        lines = "\n".join(
+            f"• <b>{html.escape(_app_name_from_url(s))}</b>  <code>{html.escape(s)}</code>"
+            for s in subs
+        )
+        bot.reply_to(message, f"当前订阅（{len(subs)} 个）：\n{lines}", parse_mode="HTML")
 
 
 @bot.message_handler(commands=["check"])
@@ -520,9 +529,10 @@ def handle_help(message: Message):
         "/dl &lt;链接或包名&gt; — 下载最新版 APK\n"
         "\n"
         "<b>支持格式：</b>\n"
-        "<code>https://www.apkmirror.com/apk/…</code>\n"
-        "<code>https://play.google.com/store/apps/details?id=…</code>\n"
-        "<code>com.android.chrome</code>\n"
+        "APKMirror 链接：<code>https://www.apkmirror.com/apk/…</code>\n"
+        "APKPure 链接：  <code>https://apkpure.com/…</code>\n"
+        "Play Store 链接：<code>https://play.google.com/store/apps/details?id=…</code>\n"
+        "包名：          <code>com.android.chrome</code>\n"
         "\n"
         "<b>🔍 状态</b>\n"
         "/check — 立即检查所有订阅更新\n"
