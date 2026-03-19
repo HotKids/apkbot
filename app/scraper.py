@@ -758,3 +758,171 @@ def cleanup_after_push(apk_path: Path) -> None:
         logger.info("已删除 APK：%s", apk_path.name)
     except OSError:
         logger.exception("删除 APK 失败：%s", apk_path)
+
+
+# ---------------------------------------------------------------------------
+# APKPure 兜底（仅包名找不到时触发，不支持订阅）
+# ---------------------------------------------------------------------------
+
+_APKPURE_BASE = "https://apkpure.net"
+
+
+def resolve_package_to_apkpure_url(session: requests.Session, package_name: str) -> Optional[str]:
+    """通过包名在 APKPure 搜索，返回应用页面 URL；未找到返回 None。"""
+    search_url = f"{_APKPURE_BASE}/search?q={package_name}"
+    try:
+        r = session_get(session, search_url,
+                        headers={"Referer": _APKPURE_BASE + "/"})
+        soup = BeautifulSoup(r.text, "lxml")
+        # 结果列表：<a class="first-info" href="/slug/package.name"> 或 <a class="title" href=...>
+        for selector in ("a.first-info", "a.title", ".search-res a.first-info",
+                         ".search-row .title a", "a[href*='{}']".format(package_name)):
+            a = soup.select_one(selector)
+            if a:
+                href = a.get("href", "")
+                if package_name.lower() in href.lower() and href.startswith("/"):
+                    return _APKPURE_BASE + href.rstrip("/")
+        # 降级：遍历所有链接
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if package_name.lower() in href.lower() and re.match(r"^/[^/]+/" + re.escape(package_name), href, re.I):
+                return _APKPURE_BASE + href.rstrip("/")
+        logger.debug("APKPure 搜索未找到：%s", package_name)
+        return None
+    except Exception as e:
+        logger.debug("APKPure 搜索失败 %s: %s", package_name, e)
+        return None
+
+
+def scrape_and_pick_apkpure(session: requests.Session, apkpure_url: str) -> Variant:
+    """抓取 APKPure 应用页面，返回 Variant（优先 APK，其次 XAPK）。"""
+    r = session_get(session, apkpure_url,
+                    headers={"Referer": _APKPURE_BASE + "/"})
+    soup = BeautifulSoup(r.text, "lxml")
+
+    # 应用名
+    app_name = ""
+    for sel in ("h1.title-like", "h1.detail-main-title", "h1", ".title"):
+        tag = soup.select_one(sel)
+        if tag:
+            app_name = tag.get_text(strip=True)
+            break
+    if not app_name:
+        app_name = apkpure_url.rstrip("/").split("/")[-2].replace("-", " ").title()
+
+    # 版本名与版本号
+    version_name = ""
+    version_code: Optional[int] = None
+    for sel in (".info-sdk span", ".detail-info-tag", ".info", "p.additional-info span"):
+        for tag in soup.select(sel):
+            text = tag.get_text(strip=True)
+            if re.match(r"\d+[\d.]+", text) and not version_name:
+                version_name = text
+            m = re.search(r"\((\d{5,})\)", text)
+            if m:
+                version_code = int(m.group(1))
+    if not version_name:
+        version_name = "unknown"
+
+    # 下载按钮链接 — APK 优先，其次 XAPK
+    variant_url = ""
+    is_bundle = False
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        text = a.get_text(" ", strip=True).lower()
+        full_href = href if href.startswith("http") else _APKPURE_BASE + href
+        if "/download" in href and "apk" in text and not is_bundle:
+            variant_url = full_href
+        if "/download" in href and "xapk" in text and not variant_url:
+            variant_url = full_href
+            is_bundle = True
+    if not variant_url:
+        # 兜底：取页面第一个 /download 链接
+        a = soup.select_one("a[href*='/download']")
+        if a:
+            href = a["href"]
+            variant_url = href if href.startswith("http") else _APKPURE_BASE + href
+
+    if not variant_url:
+        raise RuntimeError(f"APKPure：找不到下载链接（{apkpure_url}）")
+
+    # 架构、最低 Android（尽量解析）
+    architectures: list[str] = []
+    min_android_text: Optional[str] = None
+    for tag in soup.find_all(string=True):
+        s = str(tag).strip()
+        for arch in _KNOWN_ARCHITECTURES:
+            if arch in s and arch not in architectures:
+                architectures.append(arch)
+        if re.search(r"Android\s+\d+\.\d+", s) and not min_android_text:
+            m = re.search(r"Android\s+[\d.]+\+?", s)
+            if m:
+                min_android_text = m.group()
+    if not architectures:
+        architectures = ["universal"]
+
+    return Variant(
+        app_name=app_name,
+        release_version_name=version_name,
+        version_code=version_code,
+        display_build=f"({version_code})" if version_code else None,
+        variant_label="APKPure",
+        type="BUNDLE" if is_bundle else "APK",
+        is_bundle=is_bundle,
+        signatures=[],
+        architectures=architectures,
+        min_android_text=min_android_text,
+        min_android_api=None,
+        dpi="nodpi",
+        device_type=None,
+        release_url=apkpure_url,
+        variant_url=variant_url,
+        download_page_url=None,
+        final_download_url=None,
+        raw_text="",
+    )
+
+
+def resolve_and_download_apkpure(session: requests.Session, variant: Variant) -> tuple[Path, str]:
+    """从 APKPure 解析最终下载链接并下载文件。"""
+    r = session_get(session, variant.variant_url,
+                    headers={"Referer": variant.release_url})
+    soup = BeautifulSoup(r.text, "lxml")
+
+    final_url = ""
+    # 策略 1：id="download_link" 直链
+    a = soup.select_one("a#download_link, a.ga[href*='download.apkpure']")
+    if a:
+        final_url = a["href"]
+    # 策略 2：meta refresh 跳转
+    if not final_url:
+        meta = soup.select_one("meta[http-equiv='refresh']")
+        if meta:
+            content = meta.get("content", "")
+            m = re.search(r"url=(.+)", content, re.I)
+            if m:
+                final_url = m.group(1).strip("'\"")
+    # 策略 3：页面中任意 CDN 直链
+    if not final_url:
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if re.search(r"\.(apk|xapk|apkm)(\?|$)", href, re.I):
+                final_url = href
+                break
+    # 策略 4：尝试 GET variant_url 后跟随 30x 重定向（某些下载页直接重定向到文件）
+    if not final_url:
+        if re.search(r"\.(apk|xapk|apkm)(\?|$)", r.url, re.I):
+            final_url = r.url
+
+    if not final_url:
+        raise RuntimeError(f"APKPure：无法解析下载链接（{variant.variant_url}）")
+
+    variant.final_download_url = final_url
+    logger.info("APKPure 开始下载：%s", final_url)
+    safe_name = re.sub(r'\s+', "_", re.sub(r'[\\/*?:"<>|]', "_", variant.app_name))
+    ext = ".xapk" if variant.is_bundle else ".apk"
+    fallback_name = f"{safe_name}{ext}"
+    apk_path = download_file(session, final_url, fallback_name, referer=variant.variant_url)
+    file_hash = sha256_file(apk_path)
+    logger.info("APKPure 下载完成：%s (sha256=%s...)", apk_path.name, file_hash[:12])
+    return apk_path, file_hash

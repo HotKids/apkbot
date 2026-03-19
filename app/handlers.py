@@ -41,8 +41,11 @@ from scraper import (
     fetch_rss_latest_release_url,
     new_session,
     resolve_and_download,
+    resolve_and_download_apkpure,
     resolve_package_to_apkmirror_url,
+    resolve_package_to_apkpure_url,
     scrape_and_pick,
+    scrape_and_pick_apkpure,
 )
 from selector import Variant
 
@@ -103,7 +106,7 @@ def _caption_text(variant: Variant, apk_path: Path, sha256: str) -> str:
         f"DPI：<code>{variant.dpi or '—'}</code>\n"
         f"大小：<code>{size_mb:.2f} MB</code>\n"
         f"SHA256：<code>{sha256}</code>\n"
-        f"来源：<a href=\"{variant.release_url}\">APKMirror</a>"
+        f"来源：<a href=\"{variant.release_url}\">{'APKPure' if 'apkpure' in variant.release_url else 'APKMirror'}</a>"
     )
 
 
@@ -235,18 +238,30 @@ def _resolve_to_apkmirror_url(message: Message, input_str: str) -> Optional[str]
         try:
             session = new_session()
             mapped_url = resolve_package_to_apkmirror_url(session, package_name)
-            if not mapped_url:
+            if mapped_url:
+                url = mapped_url.split("?")[0].rstrip("/") + "/"
                 bot.edit_message_text(
-                    f"❌ 未能在 APKMirror 找到包名 <code>{html.escape(package_name)}</code> 对应的应用。",
+                    f"✅ 解析成功：\n<code>{html.escape(url)}</code>",
                     message.chat.id, status_msg.message_id, parse_mode="HTML",
                 )
-                return None
-            url = mapped_url.split("?")[0].rstrip("/") + "/"
+                return url
+            # APKMirror 未收录 → 尝试 APKPure
             bot.edit_message_text(
-                f"✅ 解析成功：\n<code>{html.escape(url)}</code>",
+                f"⚠️ APKMirror 未收录，正在尝试 APKPure……",
                 message.chat.id, status_msg.message_id, parse_mode="HTML",
             )
-            return url
+            apkpure_url = resolve_package_to_apkpure_url(session, package_name)
+            if apkpure_url:
+                bot.edit_message_text(
+                    f"✅ 解析成功（APKPure）：\n<code>{html.escape(apkpure_url)}</code>",
+                    message.chat.id, status_msg.message_id, parse_mode="HTML",
+                )
+                return apkpure_url
+            bot.edit_message_text(
+                f"❌ APKMirror 与 APKPure 均未收录包名 <code>{html.escape(package_name)}</code>。",
+                message.chat.id, status_msg.message_id, parse_mode="HTML",
+            )
+            return None
         except Exception as e:
             logger.exception("解析包名失败")
             bot.edit_message_text(
@@ -268,8 +283,12 @@ def _download_once(chat_id: int, apk_url: str) -> None:
     apk_path: Optional[Path] = None
     try:
         session = new_session()
-        variant = scrape_and_pick(session, apk_url)
-        apk_path, sha256 = resolve_and_download(session, variant)
+        if "apkpure" in apk_url:
+            variant = scrape_and_pick_apkpure(session, apk_url)
+            apk_path, sha256 = resolve_and_download_apkpure(session, variant)
+        else:
+            variant = scrape_and_pick(session, apk_url)
+            apk_path, sha256 = resolve_and_download(session, variant)
         _send_apk_to_user(chat_id, variant, apk_path, sha256)
     except Exception as e:
         logger.exception("一次性下载失败：chat_id=%s url=%s", chat_id, apk_url)
@@ -303,6 +322,10 @@ def handle_sub(message: Message):
     input_str = parts[1].strip()
     url = _resolve_to_apkmirror_url(message, input_str)
     if url is None:
+        return
+
+    if "apkpure" in url:
+        bot.reply_to(message, "⚠️ APKPure 链接暂不支持订阅，请使用 /dl 直接下载。")
         return
 
     added = add_subscription(message.chat.id, url)
