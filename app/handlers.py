@@ -86,16 +86,14 @@ def _build_search_keyboard(sid: str, results: list, page: int) -> InlineKeyboard
             f"{icon} {name}",
             callback_data=f"sp:{sid}:{start + i}",
         ))
-    prev_btn = InlineKeyboardButton(
-        "◀ 上一页" if page > 0 else "　",
-        callback_data=f"sg:{sid}:{page - 1}" if page > 0 else "noop",
-    )
-    page_btn = InlineKeyboardButton(f"📄 {page + 1}/{pages}", callback_data="noop")
-    next_btn = InlineKeyboardButton(
-        "下一页 ▶" if page < pages - 1 else "　",
-        callback_data=f"sg:{sid}:{page + 1}" if page < pages - 1 else "noop",
-    )
-    markup.row(prev_btn, page_btn, next_btn)
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"sg:{sid}:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"📄 {page + 1}/{pages}", callback_data="noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"sg:{sid}:{page + 1}"))
+        markup.row(*nav)
     markup.add(InlineKeyboardButton("❌ 取消", callback_data=f"sc:{sid}"))
     return markup
 
@@ -114,22 +112,22 @@ def _do_keyword_search(message: Message, keyword: str, mode: str) -> None:
             f_ap = ex.submit(search_apkpure, new_session(), keyword)
             am_list = [("🟠", n, u) for n, u in (f_am.result() or [])]
             ap_list = [("🟢", n, u) for n, u in (f_ap.result() or [])]
-        # 合并：APKMirror 在前（同分时优先），按名字与关键词相关性升序排列，取前 5
-        def _relevance(item: tuple) -> int:
-            name = item[1].lower()
-            kw = keyword.lower()
-            if name == kw:
-                return 0
-            if name.startswith(kw):
-                return 1
-            if kw in name:
-                return 2
-            if any(w in name for w in kw.split()):
-                return 3
+        # 合并：按相关性升序 + 同分时交叉排列（APKMirror 先），显示全部结果
+        def _rel(name: str) -> int:
+            n, kw = name.lower(), keyword.lower()
+            if n == kw:                         return 0
+            if n.startswith(kw):                return 1
+            if kw in n:                         return 2
+            if any(w in n for w in kw.split()): return 3
             return 4
-        combined = am_list + ap_list  # APKMirror 排前，保证同分优先
-        combined.sort(key=_relevance)  # 稳定排序，同分保持原序（APKMirror 先）
-        results = combined[:5]
+        # 排序键 (relevance, pos, source): 同分时按 position 交叉，AM(0) 优先 AP(1)
+        # 效果：AM[0] AP[0] AM[1] AP[1] ...（同分段内交叉）
+        keyed = (
+            [(_rel(item[1]), i, 0, item) for i, item in enumerate(am_list)] +
+            [(_rel(item[1]), i, 1, item) for i, item in enumerate(ap_list)]
+        )
+        keyed.sort(key=lambda x: (x[0], x[1], x[2]))
+        results = [x[3] for x in keyed]
         if not results:
             bot.edit_message_text(
                 f"❌ 未找到 <b>{html.escape(keyword)}</b> 相关应用。",

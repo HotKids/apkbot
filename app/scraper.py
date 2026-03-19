@@ -859,7 +859,14 @@ def search_apkpure(session: requests.Session, keyword: str, max_results: int = 5
         if not _APKPURE_APP_URL_RE.match(href):
             continue
         full_url = _APKPURE_BASE + href.rstrip("/")
-        name = a.get_text(strip=True)
+        # 优先取链接内的标题元素，避免把 developer/version 也拼进名字
+        title_el = a.select_one("p.title-name, .title, h3, h2, span.title, p")
+        if title_el:
+            name = title_el.get_text(strip=True)
+        else:
+            # 回退：取第一行非空文本
+            lines = [l.strip() for l in a.get_text().splitlines() if l.strip()]
+            name = lines[0] if lines else ""
         if not name:
             continue
         if full_url not in seen:
