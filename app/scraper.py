@@ -302,6 +302,32 @@ def parse_variants(session: requests.Session, release_url: str) -> list[Variant]
 # 过滤 & 打分 & 选择（委托给 selector 模块）
 # ---------------------------------------------------------------------------
 
+def fetch_app_name_from_rss(session: requests.Session, apk_url: str) -> str:
+    """从 APKMirror RSS channel title 提取 App 名。
+    channel title 格式：'Download {AppName} APKs for Android – APKMirror'
+    失败时回退到 URL 路径段。"""
+    import xml.etree.ElementTree as ET
+    rss_url = apk_url.rstrip("/") + "/feed/"
+    try:
+        r = session.get(rss_url, timeout=10,
+                        headers={"Accept": "application/rss+xml, text/xml, */*"})
+        root = ET.fromstring(r.content)
+        channel = root.find("channel")
+        if channel is None:
+            raise ValueError("no channel")
+        title = (channel.findtext("title") or "").strip()
+        # "Download WeChat APKs for Android – APKMirror" → "WeChat"
+        title = re.sub(r"^Download\s+", "", title, flags=re.I)
+        title = re.sub(r"\s+APKs?\s+for\s+Android.*$", "", title, flags=re.I)
+        if title:
+            return title
+    except Exception as e:
+        logger.debug("RSS app name fetch 失败 %s: %s", apk_url, e)
+    # 回退：URL 末尾路径段转 Title Case
+    seg = apk_url.rstrip("/").split("/")[-1]
+    return seg.replace("-", " ").title()
+
+
 def fetch_rss_latest_release_url(session: requests.Session, apk_url: str) -> Optional[str]:
     """从 APKMirror RSS feed 获取最新一条 release 的页面 URL。
     失败时返回 None，调用方回退到完整 HTML 抓取流程。"""
@@ -800,6 +826,11 @@ def scrape_and_pick_apkpure(session: requests.Session, apkpure_url: str) -> Vari
                     headers={"Referer": _APKPURE_BASE + "/"})
     soup = BeautifulSoup(r.text, "lxml")
 
+    # 从 URL 提取包名，用于过滤下载链接（避免误选 APKPure 自身的推广按钮）
+    # URL 格式：https://apkpure.net/<slug>/<package.name>
+    url_parts = apkpure_url.rstrip("/").split("/")
+    pkg_from_url = url_parts[-1] if len(url_parts) >= 2 else ""
+
     # 应用名
     app_name = ""
     for sel in ("h1.title-like", "h1.detail-main-title", "h1", ".title"):
@@ -810,13 +841,16 @@ def scrape_and_pick_apkpure(session: requests.Session, apkpure_url: str) -> Vari
     if not app_name:
         app_name = apkpure_url.rstrip("/").split("/")[-2].replace("-", " ").title()
 
-    # 版本名与版本号
+    # 版本名与版本号：严格匹配"纯版本号"文本节点，避免吸入整个容器文本
     version_name = ""
     version_code: Optional[int] = None
-    for sel in (".info-sdk span", ".detail-info-tag", ".info", "p.additional-info span"):
+    for sel in (".info-sdk span", ".detail-info-tag", "p.additional-info span",
+                ".details-sdk span", ".ver span", "[class*='version'] span",
+                ".info span"):
         for tag in soup.select(sel):
             text = tag.get_text(strip=True)
-            if re.match(r"\d+[\d.]+", text) and not version_name:
+            # 版本号必须是"纯数字.数字"形式，不能混有字母词
+            if re.match(r"^\d+(\.\d+)+$", text) and not version_name:
                 version_name = text
             m = re.search(r"\((\d{5,})\)", text)
             if m:
@@ -824,24 +858,24 @@ def scrape_and_pick_apkpure(session: requests.Session, apkpure_url: str) -> Vari
     if not version_name:
         version_name = "unknown"
 
-    # 下载按钮链接 — APK 优先，其次 XAPK
+    # 下载按钮链接 — 只取属于目标包名的 /download 链接，避免误选"下载 APKPure"推广按钮
     variant_url = ""
     is_bundle = False
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        text = a.get_text(" ", strip=True).lower()
+        # 必须包含目标包名路径，排除对 APKPure 自身的引用
+        if pkg_from_url and pkg_from_url not in href:
+            continue
         full_href = href if href.startswith("http") else _APKPURE_BASE + href
-        if "/download" in href and "apk" in text and not is_bundle:
-            variant_url = full_href
+        text = a.get_text(" ", strip=True).lower()
         if "/download" in href and "xapk" in text and not variant_url:
             variant_url = full_href
             is_bundle = True
-    if not variant_url:
-        # 兜底：取页面第一个 /download 链接
-        a = soup.select_one("a[href*='/download']")
-        if a:
-            href = a["href"]
-            variant_url = href if href.startswith("http") else _APKPURE_BASE + href
+        if "/download" in href and not is_bundle and not variant_url:
+            variant_url = full_href
+    if not variant_url and pkg_from_url:
+        # 兜底：直接构造标准下载 URL（APKPure 规律：<app_url>/download）
+        variant_url = apkpure_url.rstrip("/") + "/download"
 
     if not variant_url:
         raise RuntimeError(f"APKPure：找不到下载链接（{apkpure_url}）")
