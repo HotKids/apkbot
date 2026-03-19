@@ -109,22 +109,14 @@ def _do_keyword_search(message: Message, keyword: str, mode: str) -> None:
             f_ap = ex.submit(search_apkpure, new_session(), keyword)
             am_list = [("🟠", n, u, None) for n, u in (f_am.result() or [])]
             ap_list = [("🟢", n, u, None) for n, u in (f_ap.result() or [])]
-        # 合并：按相关性升序 + 同分时交叉排列（APKMirror 先），显示全部结果
-        def _rel(name: str) -> int:
-            n, kw = name.lower(), keyword.lower()
-            if n == kw:                         return 0
-            if n.startswith(kw):                return 1
-            if kw in n:                         return 2
-            if any(w in n for w in kw.split()): return 3
-            return 4
-        # 排序键 (relevance, pos, source): 同分时按 position 交叉，AM(0) 优先 AP(1)
-        # 效果：AM[0] AP[0] AM[1] AP[1] ...（同分段内交叉）
+        # 排序键 (pos, source): AP(0) 优先 AM(1)，按位置交叉
+        # 效果：AP[0] AM[0] AP[1] AM[1] ...
         keyed = (
-            [(_rel(item[1]), i, 0, item) for i, item in enumerate(am_list)] +
-            [(_rel(item[1]), i, 1, item) for i, item in enumerate(ap_list)]
+            [(i, 1, item) for i, item in enumerate(am_list)] +
+            [(i, 0, item) for i, item in enumerate(ap_list)]
         )
-        keyed.sort(key=lambda x: (x[0], x[1], x[2]))
-        results = [x[3] for x in keyed]
+        keyed.sort(key=lambda x: (x[0], x[1]))
+        results = [x[2] for x in keyed]
         if not results:
             bot.edit_message_text(
                 f"❌ 未找到 <b>{html.escape(keyword)}</b> 相关应用。",
