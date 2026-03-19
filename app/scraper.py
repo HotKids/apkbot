@@ -790,7 +790,7 @@ def _pkg_to_apkmirror(session: requests.Session, package_name: str) -> tuple[str
 
 def _search_apkmirror_direct(session: requests.Session, keyword: str, max_results: int) -> list[tuple[str, str]]:
     """直接在 APKMirror 关键词搜索，返回 [(name, url), ...]。"""
-    search_url = f"{BASE_URL}/?searchtype=apk&sortby=date&s={requests.utils.quote(keyword)}"
+    search_url = f"{BASE_URL}/?s={requests.utils.quote(keyword)}"
     try:
         r = session_get(session, search_url)
     except Exception:
@@ -798,6 +798,11 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
     soup = BeautifulSoup(r.text, "lxml")
     results: list[tuple[str, str]] = []
     seen: set[str] = set()
+
+    # 无匹配时页面有"No results found"提示，但侧边栏仍有热门应用链接（fontBlack）
+    # 检测到无结果立即返回空，触发 fallback，避免抓到侧边栏热门应用
+    if "No results found matching your query" in r.text:
+        return []
 
     # 直接重定向到 app 页（精确匹配）
     m = _APKMIRROR_APP_RE.match(r.url)
