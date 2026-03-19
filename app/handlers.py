@@ -3,14 +3,16 @@ import logging
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import telebot
 from telebot import TeleBot
 from telebot.types import Message
 
-from config import BOT_TOKEN, CHECK_INTERVAL, LOCAL_BOT_API_URL, OWNER_ID
+from config import BOT_TOKEN, CHECK_INTERVAL, LOCAL_BOT_API_URL, OWNER_ID, TZ
 from database import (
     add_subscription,
     add_to_whitelist,
@@ -36,7 +38,7 @@ from scraper import (
 )
 from selector import Variant
 
-logger = logging.getLogger("apkmirror-bot")
+logger = logging.getLogger("apkdl-bot")
 
 if LOCAL_BOT_API_URL:
     telebot.apihelper.API_URL = LOCAL_BOT_API_URL + "/bot{0}/{1}"
@@ -79,11 +81,12 @@ def _require_owner(message: Message) -> bool:
 def _caption_text(variant: Variant, apk_path: Path, sha256: str) -> str:
     size_mb = apk_path.stat().st_size / 1024 / 1024
     sigs = ", ".join(variant.signatures) or "—"
-    archs = ", ".join(variant.architectures) or "—"
+    arch_list = variant.architectures
+    archs = "universal" if "universal" in arch_list else (", ".join(arch_list) or "—")
+    today = datetime.now(ZoneInfo(TZ)).strftime("%Y-%m-%d")
     return (
-        f"<b>{html.escape(variant.app_name)}</b>\n"
         f"版本：<code>{html.escape(variant.release_version_name)}</code>\n"
-        f"VersionCode：<code>{variant.version_code or '—'}</code>\n"
+        f"日期：<code>{today}</code>\n"
         f"类型：<code>{variant.type}</code>\n"
         f"签名：<code>{html.escape(sigs)}</code>\n"
         f"架构：<code>{html.escape(archs)}</code>\n"
@@ -103,7 +106,7 @@ def _send_apk_to_user(chat_id: int, variant: Variant, apk_path: Path, sha256: st
             chat_id,
             f,
             visible_file_name=re.sub(r'\s+', "_", re.sub(r'[\\/*?:"<>|]', "_",
-                f"{variant.app_name}_{variant.release_version_name}")) + (".apkm" if variant.is_bundle else ".apk"),
+                variant.app_name)) + (".apkm" if variant.is_bundle else ".apk"),
             caption=caption,
             timeout=300,
         )
