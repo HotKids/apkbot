@@ -51,6 +51,7 @@ from scraper import (
     search_apkmirror,
     search_apkpure,
 )
+from cachetools import TTLCache
 from selector import Variant
 
 logger = logging.getLogger("apkdl-bot")
@@ -60,8 +61,8 @@ if LOCAL_BOT_API_URL:
 
 bot = TeleBot(BOT_TOKEN, parse_mode="HTML")
 check_lock = threading.Lock()
-_dl_callbacks: dict[str, str] = {}        # uuid → apk_url
-_search_sessions: dict[str, dict] = {}    # sid → {results, mode, chat_id}
+_dl_callbacks: TTLCache = TTLCache(maxsize=10000, ttl=86400 * 7)   # uuid → apk_url，7 天自动过期
+_search_sessions: TTLCache = TTLCache(maxsize=1000, ttl=1800)      # sid → {results, mode, chat_id}，30 分钟自动过期
 
 # 标准包名：至少含一个点，仅 ASCII 字母数字 + _ + .
 _PKG_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$')
@@ -168,6 +169,15 @@ def _safe_send(chat_id: int, text: str, **kwargs) -> None:
         logger.warning("发送消息失败：chat_id=%s", chat_id)
 
 
+def _safe_send_long_text(chat_id: int, text: str, **kwargs) -> None:
+    """分段发送超长文本，避免触发 Telegram 4096 字符限制。"""
+    for i in range(0, len(text), 4000):
+        try:
+            bot.send_message(chat_id, text[i:i + 4000], **kwargs)
+        except Exception:
+            logger.warning("发送分段消息失败：chat_id=%s", chat_id)
+
+
 def _is_allowed(message: Message) -> bool:
     """OWNER 或白名单用户才允许使用 Bot。"""
     uid = message.from_user.id
@@ -179,17 +189,15 @@ def _is_owner(message: Message) -> bool:
 
 
 def _require_allowed(message: Message) -> bool:
-    """通用权限检查（私聊 + 白名单/OWNER），其他用户静默丢弃。"""
-    if message.chat.type != "private":
-        return False
-    return _is_allowed(message)
+    """通用权限检查：OWNER / 白名单用户 / 白名单群组，其他静默丢弃。"""
+    uid = message.from_user.id
+    chat_id = message.chat.id
+    return uid == OWNER_ID or is_in_whitelist(uid) or is_in_whitelist(chat_id)
 
 
 def _require_owner(message: Message) -> bool:
     """仅 OWNER 可用的命令检查，非 OWNER 静默丢弃。"""
-    if message.chat.type != "private":
-        return False
-    return _is_owner(message)
+    return message.from_user.id == OWNER_ID
 
 
 def _caption_text(variant: Variant, apk_path: Path, sha256: str) -> str:
@@ -552,8 +560,8 @@ def handle_sublist(message: Message):
         f"<a href=\"{html.escape(s)}\">{html.escape(s)}</a>"
         for s in subs
     )
-    bot.reply_to(
-        message,
+    _safe_send_long_text(
+        message.chat.id,
         f"当前订阅（{len(subs)} 个）：\n{lines}",
         parse_mode="HTML",
         disable_web_page_preview=True,
@@ -585,7 +593,7 @@ def handle_status(message: Message):
         version_str = html.escape(ver["last_version_name"]) if ver and ver["last_version_name"] else "—"
         checked_str = ver["last_checked_at"] if ver and ver["last_checked_at"] else "—"
         lines.append(f"\n📦 <code>{app_label}</code>\n  版本：{version_str}\n  检查：{checked_str}")
-    bot.reply_to(message, "\n".join(lines))
+    _safe_send_long_text(message.chat.id, "\n".join(lines), parse_mode="HTML")
 
 
 @bot.message_handler(commands=["add"])
