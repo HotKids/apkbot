@@ -754,16 +754,6 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
 # ---------------------------------------------------------------------------
 
 _APKMIRROR_APP_RE = re.compile(r"^https?://(?:www\.)?apkmirror\.com(/apk/[^/]+/[^/]+)/?$")
-# 用于归一化 APKMirror 应用名称以去重：剥离版本号后缀和括号变体注释
-_AM_VER_SUFFIX_RE = re.compile(r'\s+\d[\d.]*(?:\s+(?:beta|alpha|rc\w*))?$', re.IGNORECASE)
-_AM_VARIANT_RE = re.compile(r'\s*\([^)]+\)\s*')
-
-
-def _norm_am_name(name: str) -> str:
-    """剥离版本号和括号变体后小写，用于名称去重。"""
-    name = _AM_VER_SUFFIX_RE.sub('', name)
-    name = _AM_VARIANT_RE.sub(' ', name).strip()
-    return name.lower()
 
 
 def _pkg_to_apkmirror(session: requests.Session, package_name: str) -> tuple[str, str] | None:
@@ -800,7 +790,7 @@ def _pkg_to_apkmirror(session: requests.Session, package_name: str) -> tuple[str
 
 def _search_apkmirror_direct(session: requests.Session, keyword: str, max_results: int) -> list[tuple[str, str]]:
     """直接在 APKMirror 关键词搜索，返回 [(name, url), ...]。"""
-    search_url = f"{BASE_URL}/?searchtype=apk&s={requests.utils.quote(keyword)}"
+    search_url = f"{BASE_URL}/?searchtype=app&sortby=date&s={requests.utils.quote(keyword)}"
     try:
         r = session_get(session, search_url)
     except Exception:
@@ -817,12 +807,10 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
         name = h1.get_text(strip=True) if h1 else keyword
         return [(name, app_url)]
 
-    # APKS tab：a.fontBlack 为版本页（3 段），截断为 app URL 后双重去重
-    # seen_urls：精确 URL 去重（同一 app 不同版本）
-    # seen_names：归一化名称去重（同一 app 不同变体，如 Wear OS / Android TV）
+    # APPS tab（sortby=date）：a.fontBlack 通常直接指向 2 段 app URL
+    # 保留 3 段截断逻辑作为兜底；仅按 URL 去重，不做名称归一化
     _apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
-    seen_urls: set[str] = set()
-    seen_names: set[str] = set()
+    seen: set[str] = set()
     for a in soup.select("a.fontBlack"):
         href = a.get("href", "")
         if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
@@ -833,10 +821,8 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
             continue
         url = BASE_URL + app_path + "/"
         name = a.get_text(strip=True)
-        norm = _norm_am_name(name)
-        if url not in seen_urls and norm not in seen_names and name:
-            seen_urls.add(url)
-            seen_names.add(norm)
+        if url not in seen and name:
+            seen.add(url)
             results.append((name, url))
             if len(results) >= max_results:
                 break
@@ -886,7 +872,7 @@ def search_apkpure(session: requests.Session, keyword: str, max_results: int = 5
     return results
 
 
-def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 5) -> list[tuple[str, str]]:
+def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 20) -> list[tuple[str, str]]:
     """主路径：APKMirror 直搜；无结果时 fallback：取 APKPure 第一条结果名称再搜 APKMirror。"""
     results = _search_apkmirror_direct(session, keyword, max_results)
     if results:
