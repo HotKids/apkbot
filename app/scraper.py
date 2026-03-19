@@ -815,29 +815,78 @@ def _pkg_to_apkmirror(session: requests.Session, package_name: str) -> tuple[str
     return None
 
 
-def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 5) -> list[tuple[str, str]]:
-    """通过 Google Play 搜索关键词，再逐一映射到 APKMirror；无法映射的丢弃。"""
+def _search_apkmirror_direct(session: requests.Session, keyword: str, max_results: int) -> list[tuple[str, str]]:
+    """直接在 APKMirror 关键词搜索，返回 [(name, url), ...]。"""
+    search_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}"
+    try:
+        r = session_get(session, search_url)
+    except Exception:
+        return []
+    soup = BeautifulSoup(r.text, "lxml")
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    # 直接重定向到 app 页（精确匹配）
+    m = _APKMIRROR_APP_RE.match(r.url)
+    if m:
+        app_url = BASE_URL + m.group(1) + "/"
+        h1 = soup.select_one("h1.app-title, h1")
+        name = h1.get_text(strip=True) if h1 else keyword
+        return [(name, app_url)]
+
+    # 搜索结果页 a.fontBlack
+    for a in soup.select("a.fontBlack"):
+        href = a.get("href", "")
+        if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
+            url = BASE_URL + href.rstrip("/") + "/"
+            name = a.get_text(strip=True)
+            if url not in seen and name:
+                seen.add(url)
+                results.append((name, url))
+                if len(results) >= max_results:
+                    break
+
+    # 降级：全页扫描
+    if not results:
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
+                url = BASE_URL + href.rstrip("/") + "/"
+                name = a.get_text(strip=True)
+                if url not in seen and name:
+                    seen.add(url)
+                    results.append((name, url))
+                    if len(results) >= max_results:
+                        break
+    return results
+
+
+def _search_apkmirror_via_play(session: requests.Session, keyword: str, max_results: int) -> list[tuple[str, str]]:
+    """Google Play → 包名 → APKMirror 映射，无法映射的丢弃。"""
     pkgs = _search_google_play(session, keyword, max_results * 3)
     if not pkgs:
         return []
-
     results: list[tuple[str, str]] = []
-    seen_urls: set[str] = set()
-
-    # 并发查询 APKMirror（最多 4 个并发，避免触发限速）
+    seen: set[str] = set()
     with ThreadPoolExecutor(max_workers=4) as ex:
-        fut_map = {ex.submit(_pkg_to_apkmirror, session, pkg): pkg for pkg in pkgs}
-        for fut in as_completed(fut_map):
+        for fut in as_completed({ex.submit(_pkg_to_apkmirror, session, p): p for p in pkgs}):
             try:
                 res = fut.result()
             except Exception:
                 continue
-            if res and res[1] not in seen_urls:
-                seen_urls.add(res[1])
+            if res and res[1] not in seen:
+                seen.add(res[1])
                 results.append(res)
                 if len(results) >= max_results:
                     break
+    return results
 
+
+def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 5) -> list[tuple[str, str]]:
+    """主路径：APKMirror 直搜；无结果时 fallback Google Play → APKMirror 映射。"""
+    results = _search_apkmirror_direct(session, keyword, max_results)
+    if not results:
+        results = _search_apkmirror_via_play(session, keyword, max_results)
     return results
 
 
