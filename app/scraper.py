@@ -789,45 +789,19 @@ def _pkg_to_apkmirror(session: requests.Session, package_name: str) -> tuple[str
     return None
 
 
-def _search_apkmirror_direct(session: requests.Session, keyword: str, max_results: int) -> list[tuple[str, str]]:
-    """直接在 APKMirror 关键词搜索，返回 [(name, url), ...]。"""
-    search_url = f"{BASE_URL}/?searchtype=app&sortby=date&s={requests.utils.quote(keyword)}"
-    try:
-        r = session_get(session, search_url)
-    except Exception:
-        return []
-    soup = BeautifulSoup(r.text, "lxml")
+_apk_2seg_re = re.compile(r"^/apk/[^/]+/[^/]+/?$")
+_apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
+
+
+def _parse_fontblack_apps(soup: BeautifulSoup, max_results: int) -> list[tuple[str, str]]:
+    """APPS tab：只收 2 段 app URL，3 段版本 URL（侧边栏热门）直接跳过。"""
     results: list[tuple[str, str]] = []
     seen: set[str] = set()
-
-    # 无匹配时页面有"No results found"提示，但侧边栏仍有热门应用链接（fontBlack）
-    # 任何关键词无结果时立即返回空，避免抓到侧边栏热门应用
-    if "No results found matching your query" in r.text:
-        return []
-
-    # 直接重定向到 app 页（精确匹配）
-    m = _APKMIRROR_APP_RE.match(r.url)
-    if m:
-        app_url = BASE_URL + m.group(1) + "/"
-        h1 = soup.select_one("h1.app-title, h1")
-        name = h1.get_text(strip=True) if h1 else keyword
-        return [(name, app_url)]
-
-    # 移除侧边栏（Bootstrap 窄列），避免抓取 "Popular In Last 30 Days" 等热门应用链接
-    for sidebar in soup.select("div.col-md-3, div.col-md-4, div.col-sm-4, aside"):
-        sidebar.decompose()
-
-    # APPS tab：a.fontBlack 直接指向 2 段 app URL；保留 3 段截断逻辑作为兜底
-    _apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
     for a in soup.select("a.fontBlack"):
         href = a.get("href", "")
-        if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
-            app_path = href.rstrip("/")
-        elif m2 := _apk_ver_re.match(href):
-            app_path = m2.group(1)
-        else:
+        if not _apk_2seg_re.match(href):
             continue
-        url = BASE_URL + app_path + "/"
+        url = BASE_URL + href.rstrip("/") + "/"
         name = a.get_text(strip=True)
         if url not in seen and name:
             seen.add(url)
@@ -837,6 +811,72 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
     return results
 
 
+def _parse_fontblack_apks(soup: BeautifulSoup, max_results: int) -> list[tuple[str, str]]:
+    """APKS tab：将 3 段版本 URL 截断为 2 段 app URL，用出现次数≥2 过滤侧边栏。
+    真实搜索结果（同一 app 多个版本）同一 2 段 URL 重复出现；
+    侧边栏热门每个 app 只出现 1 次，count=1 → 跳过。
+    """
+    url_order: list[str] = []
+    url_counts: dict[str, int] = {}
+    url_names: dict[str, str] = {}
+    for a in soup.select("a.fontBlack"):
+        href = a.get("href", "")
+        m = _apk_ver_re.match(href)
+        if not m:
+            continue
+        two_seg = m.group(1)
+        url_counts[two_seg] = url_counts.get(two_seg, 0) + 1
+        if two_seg not in url_names:
+            url_names[two_seg] = a.get_text(strip=True)
+            url_order.append(two_seg)
+    results: list[tuple[str, str]] = []
+    for two_seg in url_order:
+        if url_counts[two_seg] >= 2:
+            name = url_names.get(two_seg, "")
+            if name:
+                results.append((name, BASE_URL + two_seg + "/"))
+                if len(results) >= max_results:
+                    break
+    return results
+
+
+def _search_apkmirror_direct(session: requests.Session, keyword: str, max_results: int) -> list[tuple[str, str]]:
+    """直接在 APKMirror 关键词搜索，返回 [(name, url), ...]。
+    先走 APPS tab（2 段 URL，sidebar 为 3 段可过滤）；
+    APPS tab 无结果时 fallback 到 APKS tab（count≥2 过滤 sidebar）。
+    """
+    def _fetch(url: str):
+        try:
+            return session_get(session, url)
+        except Exception:
+            return None
+
+    # ── APPS tab ────────────────────────────────────────────────────────────
+    apps_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}"
+    r = _fetch(apps_url)
+    if r is not None and "No results found matching your query" not in r.text:
+        m = _APKMIRROR_APP_RE.match(r.url)
+        if m:
+            soup = BeautifulSoup(r.text, "lxml")
+            h1 = soup.select_one("h1.app-title, h1")
+            name = h1.get_text(strip=True) if h1 else keyword
+            return [(name, BASE_URL + m.group(1) + "/")]
+        results = _parse_fontblack_apps(BeautifulSoup(r.text, "lxml"), max_results)
+        if results:
+            return results
+
+    # ── APKS tab fallback（APPS tab 无结果时）───────────────────────────────
+    apks_url = f"{BASE_URL}/?searchtype=apk&s={requests.utils.quote(keyword)}"
+    r2 = _fetch(apks_url)
+    if r2 is None or "No results found matching your query" in r2.text:
+        return []
+    m2 = _APKMIRROR_APP_RE.match(r2.url)
+    if m2:
+        soup2 = BeautifulSoup(r2.text, "lxml")
+        h1 = soup2.select_one("h1.app-title, h1")
+        name = h1.get_text(strip=True) if h1 else keyword
+        return [(name, BASE_URL + m2.group(1) + "/")]
+    return _parse_fontblack_apks(BeautifulSoup(r2.text, "lxml"), max_results)
 
 
 # APKPure 应用页 URL 格式：/slug/com.package.name（第二段为合法包名）
