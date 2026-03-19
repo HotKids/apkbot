@@ -63,10 +63,13 @@ bot = TeleBot(BOT_TOKEN, parse_mode="HTML")
 check_lock = threading.Lock()
 _dl_callbacks: TTLCache = TTLCache(maxsize=10000, ttl=86400 * 7)   # uuid → apk_url，7 天自动过期
 _search_sessions: TTLCache = TTLCache(maxsize=1000, ttl=1800)      # sid → {results, mode, chat_id}，30 分钟自动过期
+_app_sessions: TTLCache = TTLCache(maxsize=1000, ttl=1800)         # sid → {"results": [(name,url),...], "chat_id": int}
+_app_actions: TTLCache = TTLCache(maxsize=1000, ttl=1800)          # uid → {"name": str, "ap_url": str, "am_url": str|None}
 
 # 标准包名：至少含一个点，仅 ASCII 字母数字 + _ + .
 _PKG_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$')
 _SEARCH_PAGE_SIZE = 5
+_APP_PAGE_SIZE = 8
 
 
 def _is_keyword(s: str) -> bool:
@@ -117,6 +120,44 @@ def _build_search_keyboard(
     return markup
 
 
+def _build_app_keyboard(sid: str, results: list, page: int) -> InlineKeyboardMarkup:
+    """构建 /app 搜索结果键盘，纯 APKPure，每页 _APP_PAGE_SIZE 条。"""
+    total = len(results)
+    pages = max(1, (total + _APP_PAGE_SIZE - 1) // _APP_PAGE_SIZE)
+    start = page * _APP_PAGE_SIZE
+    markup = InlineKeyboardMarkup()
+    for i, (name, _url) in enumerate(results[start:start + _APP_PAGE_SIZE]):
+        markup.add(InlineKeyboardButton(name, callback_data=f"apr:{sid}:{start + i}"))
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"apg:{sid}:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"📄 {page + 1}/{pages}", callback_data="noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"apg:{sid}:{page + 1}"))
+        markup.row(*nav)
+    markup.add(InlineKeyboardButton("❌ 取消", callback_data=f"apc:{sid}"))
+    return markup
+
+
+def _build_app_action_keyboard(uid: str, has_am: bool) -> InlineKeyboardMarkup:
+    """三排动作键盘。has_am：APKMirror 是否收录该应用。"""
+    markup = InlineKeyboardMarkup()
+    sub_row = []
+    if has_am:
+        sub_row.append(InlineKeyboardButton("📲 订阅 APKMirror", callback_data=f"aas_am:{uid}"))
+    sub_row.append(InlineKeyboardButton("📲 订阅 APKPure", callback_data=f"aas_ap:{uid}"))
+    markup.row(*sub_row)
+    dl_row = []
+    if has_am:
+        dl_row.append(InlineKeyboardButton("⏬ 下载 APKMirror", callback_data=f"aad_am:{uid}"))
+    dl_row.append(InlineKeyboardButton("⏬ 下载 APKPure", callback_data=f"aad_ap:{uid}"))
+    markup.row(*dl_row)
+    markup.add(InlineKeyboardButton("🕐 下载历史版本", callback_data=f"aah:{uid}"))
+    markup.add(InlineKeyboardButton("❌ 取消", callback_data=f"aac:{uid}"))
+    return markup
+
+
 def _do_keyword_search(message: Message, keyword: str, mode: str) -> None:
     """在后台线程中执行关键词搜索并展示结果键盘。"""
     try:
@@ -158,6 +199,38 @@ def _do_keyword_search(message: Message, keyword: str, mode: str) -> None:
                 f"❌ 搜索失败：{html.escape(str(e))}",
                 message.chat.id, status_msg.message_id, parse_mode="HTML",
             )
+        except Exception:
+            pass
+
+
+def _do_app_search(message: Message, keyword: str) -> None:
+    """后台线程：搜索 APKPure，展示结果键盘（不限制结果数）。"""
+    try:
+        status_msg = bot.reply_to(
+            message, f"🔍 正在搜索 <b>{html.escape(keyword)}</b>……", parse_mode="HTML"
+        )
+    except Exception:
+        return
+    try:
+        results = search_apkpure(new_session(), keyword, max_results=50)
+        if not results:
+            bot.edit_message_text(
+                f"❌ APKPure 未找到 <b>{html.escape(keyword)}</b> 相关应用。",
+                message.chat.id, status_msg.message_id, parse_mode="HTML",
+            )
+            return
+        sid = _uuid_mod.uuid4().hex[:8]
+        _app_sessions[sid] = {"results": results, "chat_id": message.chat.id}
+        markup = _build_app_keyboard(sid, results, 0)
+        bot.edit_message_text(
+            f"🔍 <b>{html.escape(keyword)}</b> 的搜索结果（APKPure，共 {len(results)} 个），请选择：",
+            message.chat.id, status_msg.message_id,
+            parse_mode="HTML", reply_markup=markup,
+        )
+    except Exception:
+        logger.exception("APKPure 搜索失败：keyword=%s", keyword)
+        try:
+            bot.edit_message_text("❌ 搜索出错，请稍后重试。", message.chat.id, status_msg.message_id)
         except Exception:
             pass
 
@@ -351,6 +424,9 @@ def _resolve_to_apkmirror_url(message: Message, input_str: str) -> Optional[str]
     if re.match(r"^https?://(www\.)?apkmirror\.com/apk/", input_str):
         return input_str.split("?")[0].rstrip("/") + "/"
 
+    if re.match(r"^https?://apkpure\.", input_str):
+        return input_str.split("?")[0].rstrip("/")
+
     package_name = None
     if "play.google.com" in input_str:
         m = re.search(r"[?&]id=([a-zA-Z0-9_.]+)", input_str)
@@ -453,17 +529,16 @@ def handle_sub(message: Message):
             "用法：/sub &lt;链接或包名&gt;\n\n"
             "订阅应用更新，有新版本时自动通知。支持以下格式：\n"
             "APKMirror 链接：<code>https://www.apkmirror.com/apk/…</code>\n"
-            "APKPure 链接：  <code>https://apkpure.com/…</code>\n"
             "Play Store 链接：<code>https://play.google.com/store/apps/details?id=…</code>\n"
             "包名：          <code>com.android.chrome</code>\n"
-            "关键词：        <code>豆包</code> / <code>wechat</code>（搜索后从列表选择）",
+            "关键词搜索请使用 /app",
             parse_mode="HTML",
         )
         return
 
     input_str = parts[1].strip()
     if _is_keyword(input_str):
-        threading.Thread(target=_do_keyword_search, args=(message, input_str, "sub"), daemon=True).start()
+        bot.reply_to(message, "🔍 请使用 /app &lt;关键词&gt; 搜索应用后订阅。")
         return
 
     url = _resolve_to_apkmirror_url(message, input_str)
@@ -494,17 +569,17 @@ def handle_dl(message: Message):
             "用法：/dl &lt;链接或包名&gt;\n\n"
             "一次性下载并发送 APK，不创建订阅。支持以下格式：\n"
             "APKMirror 链接：<code>https://www.apkmirror.com/apk/…</code>\n"
-            "APKPure 链接：  <code>https://apkpure.com/…</code>\n"
+            "APKPure 链接：  <code>https://apkpure.net/…</code>\n"
             "Play Store 链接：<code>https://play.google.com/store/apps/details?id=…</code>\n"
             "包名：          <code>com.android.chrome</code>\n"
-            "关键词：        <code>豆包</code> / <code>wechat</code>（搜索后从列表选择）",
+            "关键词搜索请使用 /app",
             parse_mode="HTML",
         )
         return
 
     input_str = parts[1].strip()
     if _is_keyword(input_str):
-        threading.Thread(target=_do_keyword_search, args=(message, input_str, "dl"), daemon=True).start()
+        bot.reply_to(message, "🔍 请使用 /app &lt;关键词&gt; 搜索应用后下载。")
         return
 
     url = _resolve_to_apkmirror_url(message, input_str)
@@ -513,6 +588,22 @@ def handle_dl(message: Message):
 
     status_msg = bot.reply_to(message, f"⏬ 正在下载，请稍等……\n<code>{html.escape(url)}</code>")
     threading.Thread(target=_download_once, args=(message.chat.id, url, status_msg.message_id), daemon=True).start()
+
+
+@bot.message_handler(commands=["app"])
+def handle_app(message: Message):
+    if not _require_allowed(message):
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(
+            message,
+            "用法：/app &lt;关键词&gt;\n\n"
+            "通过 APKPure 搜索应用，选中后可订阅、下载或查询历史版本。",
+            parse_mode="HTML",
+        )
+        return
+    threading.Thread(target=_do_app_search, args=(message, parts[1].strip()), daemon=True).start()
 
 
 @bot.message_handler(commands=["unsub"])
@@ -782,3 +873,140 @@ def handle_search_callback(call: CallbackQuery):
             threading.Thread(
                 target=_download_once, args=(chat_id, apk_url, status_msg.message_id), daemon=True
             ).start()
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith(("apr:", "apg:", "apc:")))
+def handle_app_search_callback(call: CallbackQuery):
+    data = call.data
+
+    if data.startswith("apc:"):
+        _app_sessions.pop(data[4:], None)
+        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_text("❌ 已取消搜索。", call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        return
+
+    if data.startswith("apg:"):
+        _, sid, page_str = data.split(":", 2)
+        sess = _app_sessions.get(sid)
+        if not sess:
+            bot.answer_callback_query(call.id, "⚠️ 会话已过期。")
+            return
+        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_reply_markup(
+                call.message.chat.id, call.message.message_id,
+                reply_markup=_build_app_keyboard(sid, sess["results"], int(page_str)),
+            )
+        except Exception:
+            pass
+        return
+
+    if data.startswith("apr:"):
+        _, sid, idx_str = data.split(":", 2)
+        sess = _app_sessions.pop(sid, None)
+        if not sess:
+            bot.answer_callback_query(call.id, "⚠️ 会话已过期。")
+            return
+        name, apkpure_url = sess["results"][int(idx_str)]
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        msg_id = call.message.message_id
+
+        def _resolve_and_show():
+            try:
+                bot.edit_message_text(
+                    f"⏳ 正在查询 APKMirror 是否收录 <b>{html.escape(name)}</b>……",
+                    chat_id, msg_id, parse_mode="HTML",
+                )
+            except Exception:
+                pass
+            pkg = apkpure_url.rstrip("/").split("/")[-1]
+            am_url = resolve_package_to_apkmirror_url(new_session(), pkg)
+            uid = _uuid_mod.uuid4().hex[:8]
+            _app_actions[uid] = {"name": name, "ap_url": apkpure_url, "am_url": am_url}
+            has_am = bool(am_url)
+            src_line = f"APKMirror：<code>{html.escape(am_url)}</code>\n" if am_url else "APKMirror：❌ 未收录\n"
+            text = (
+                f"<b>{html.escape(name)}</b>\n"
+                + src_line
+                + f"APKPure：<code>{html.escape(apkpure_url)}</code>\n\n"
+                + "请选择操作："
+            )
+            try:
+                bot.edit_message_text(
+                    text, chat_id, msg_id,
+                    parse_mode="HTML",
+                    reply_markup=_build_app_action_keyboard(uid, has_am),
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_resolve_and_show, daemon=True).start()
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith(("aas_am:", "aas_ap:", "aad_am:", "aad_ap:", "aah:", "aac:")))
+def handle_app_action_callback(call: CallbackQuery):
+    data = call.data
+    uid = None
+    for prefix in ("aas_am:", "aas_ap:", "aad_am:", "aad_ap:", "aah:", "aac:"):
+        if data.startswith(prefix):
+            uid = data[len(prefix):]
+            break
+    if uid is None:
+        bot.answer_callback_query(call.id)
+        return
+
+    if data.startswith("aac:"):
+        _app_actions.pop(uid, None)
+        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_text("❌ 已取消。", call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        return
+
+    if data.startswith("aah:"):
+        bot.answer_callback_query(call.id, "⚠️ 历史版本功能即将上线，敬请期待。")
+        return
+
+    action_data = _app_actions.get(uid)
+    if not action_data:
+        bot.answer_callback_query(call.id, "⚠️ 会话已过期，请重新搜索。")
+        return
+
+    name = action_data["name"]
+    ap_url = action_data["ap_url"]
+    am_url = action_data.get("am_url")
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+
+    if data.startswith("aad_ap:"):
+        status_msg = bot.send_message(
+            chat_id, f"⏬ 正在下载（APKPure）……\n<code>{html.escape(ap_url)}</code>", parse_mode="HTML",
+        )
+        threading.Thread(target=_download_once, args=(chat_id, ap_url, status_msg.message_id), daemon=True).start()
+        return
+
+    if data.startswith("aad_am:") and am_url:
+        status_msg = bot.send_message(
+            chat_id, f"⏬ 正在下载（APKMirror）……\n<code>{html.escape(am_url)}</code>", parse_mode="HTML",
+        )
+        threading.Thread(target=_download_once, args=(chat_id, am_url, status_msg.message_id), daemon=True).start()
+        return
+
+    if data.startswith("aas_am:") and am_url:
+        added = add_subscription(chat_id, am_url)
+        dl_uid = _uuid_mod.uuid4().hex[:8]
+        _dl_callbacks[dl_uid] = am_url
+        markup2 = InlineKeyboardMarkup()
+        markup2.add(InlineKeyboardButton("⏬ 下载 APK", callback_data=f"dl:{dl_uid}"))
+        reply_text = "⚠️ 已订阅该应用。" if not added else f"✅ 订阅成功（APKMirror）！\n<code>{html.escape(am_url)}</code>"
+        _safe_send(chat_id, reply_text, reply_markup=markup2, parse_mode="HTML")
+        return
+
+    if data.startswith("aas_ap:"):
+        _safe_send(chat_id, "⚠️ APKPure 订阅暂不支持（无法追踪更新），请使用⏬下载选项。")
+        return
