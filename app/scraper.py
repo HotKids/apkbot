@@ -808,18 +808,23 @@ def _parse_fontblack_apps(soup: BeautifulSoup, max_results: int) -> list[tuple[s
     results: list[tuple[str, str]] = []
     seen: set[str] = set()
     for a in soup.find_all("a", href=True):
-        href = a["href"]
-        path = urlparse(href).path if href.startswith("http") else href
+        path = urlparse(a["href"]).path
+        if not path.startswith("/"):
+            path = "/" + path
         if not _apk_2seg_re.match(path):
             continue
         url = BASE_URL + path.rstrip("/") + "/"
         name = a.get_text(strip=True)
-        if name and len(name) > 1 and "download" not in name.lower() and "apkmirror" not in name.lower():
-            if url not in seen:
-                seen.add(url)
-                results.append((name, url))
-                if len(results) >= max_results:
-                    break
+        if not name or len(name) < 2:
+            continue
+        name_lower = name.lower()
+        if name_lower in ("download", "download apk", "here") or "apkmirror" in name_lower:
+            continue
+        if url not in seen:
+            seen.add(url)
+            results.append((name, url))
+            if len(results) >= max_results:
+                break
     return results
 
 
@@ -830,8 +835,9 @@ def _parse_fontblack_apks(soup: BeautifulSoup, max_results: int) -> list[tuple[s
     url_counts: dict[str, int] = {}
     url_names: dict[str, str] = {}
     for a in soup.find_all("a", href=True):
-        href = a["href"]
-        path = urlparse(href).path if href.startswith("http") else href
+        path = urlparse(a["href"]).path
+        if not path.startswith("/"):
+            path = "/" + path
         m = _apk_ver_re.match(path)
         if not m:
             continue
@@ -839,9 +845,13 @@ def _parse_fontblack_apks(soup: BeautifulSoup, max_results: int) -> list[tuple[s
         url_counts[two_seg] = url_counts.get(two_seg, 0) + 1
         if two_seg not in url_names:
             name = a.get_text(strip=True)
-            if name and len(name) > 1:
-                url_names[two_seg] = name
-                url_order.append(two_seg)
+            if not name or len(name) < 2:
+                continue
+            name_lower = name.lower()
+            if name_lower in ("download", "download apk", "here") or "apkmirror" in name_lower:
+                continue
+            url_names[two_seg] = name
+            url_order.append(two_seg)
     results: list[tuple[str, str]] = []
     for two_seg in url_order:
         if url_counts[two_seg] >= 2:
@@ -860,8 +870,12 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
     """
     def _fetch(url: str):
         try:
-            return session_get(session, url)
-        except Exception:
+            r = session_get(session, url)
+            if r is not None and ("Cloudflare" in r.text or "Just a moment" in r.text):
+                logger.warning("🚨 触发 Cloudflare 拦截: %s", url)
+            return r
+        except Exception as e:
+            logger.warning("🚨 请求失败或被拦截 %s: %s", url, e)
             return None
 
     # ── APPS tab ────────────────────────────────────────────────────────────
