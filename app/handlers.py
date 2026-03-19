@@ -109,10 +109,9 @@ def _do_keyword_search(message: Message, keyword: str, mode: str) -> None:
     except Exception:
         return
     try:
-        session = new_session()
         with ThreadPoolExecutor(max_workers=2) as ex:
-            f_am = ex.submit(search_apkmirror, session, keyword)
-            f_ap = ex.submit(search_apkpure, session, keyword)
+            f_am = ex.submit(search_apkmirror, new_session(), keyword)
+            f_ap = ex.submit(search_apkpure, new_session(), keyword)
             am_list = [("🟠", n, u) for n, u in (f_am.result() or [])]
             ap_list = [("🟢", n, u) for n, u in (f_ap.result() or [])]
         # 交替合并（相关性混排）
