@@ -75,22 +75,43 @@ def _is_keyword(s: str) -> bool:
     return not _PKG_RE.match(s)
 
 
-def _build_search_keyboard(sid: str, results: list, page: int) -> InlineKeyboardMarkup:
-    """构建搜索结果分页键盘。results 元素为 (icon, name, url)。"""
-    total = len(results)
+def _build_search_keyboard(
+    sid: str,
+    am_list: list,
+    ap_list: list,
+    source: str,
+    page: int,
+) -> InlineKeyboardMarkup:
+    """构建双源分 tab 搜索键盘。source="am"|"ap"，每页 _SEARCH_PAGE_SIZE 条。"""
+    cur_list = am_list if source == "am" else ap_list
+    total = len(cur_list)
     pages = max(1, (total + _SEARCH_PAGE_SIZE - 1) // _SEARCH_PAGE_SIZE)
     start = page * _SEARCH_PAGE_SIZE
     markup = InlineKeyboardMarkup()
-    for i, (icon, name, _url, pkg) in enumerate(results[start:start + _SEARCH_PAGE_SIZE]):
-        markup.add(InlineKeyboardButton(f"{icon} {name}", callback_data=f"sp:{sid}:{start + i}"))
+
+    # Tab 切换行（两源都有结果时才显示）
+    if am_list and ap_list:
+        am_label = f"✓ APKMirror ({len(am_list)})" if source == "am" else f"APKMirror ({len(am_list)})"
+        ap_label = f"✓ APKPure ({len(ap_list)})" if source == "ap" else f"APKPure ({len(ap_list)})"
+        markup.row(
+            InlineKeyboardButton(am_label, callback_data=f"st:{sid}:am"),
+            InlineKeyboardButton(ap_label, callback_data=f"st:{sid}:ap"),
+        )
+
+    # 结果按钮
+    for i, (name, _url) in enumerate(cur_list[start:start + _SEARCH_PAGE_SIZE]):
+        markup.add(InlineKeyboardButton(name, callback_data=f"sp:{sid}:{source}:{start + i}"))
+
+    # 翻页行
     if pages > 1:
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"sg:{sid}:{page - 1}"))
+            nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"sg:{sid}:{source}:{page - 1}"))
         nav.append(InlineKeyboardButton(f"📄 {page + 1}/{pages}", callback_data="noop"))
         if page < pages - 1:
-            nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"sg:{sid}:{page + 1}"))
+            nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"sg:{sid}:{source}:{page + 1}"))
         markup.row(*nav)
+
     markup.add(InlineKeyboardButton("❌ 取消", callback_data=f"sc:{sid}"))
     return markup
 
@@ -106,18 +127,10 @@ def _do_keyword_search(message: Message, keyword: str, mode: str) -> None:
     try:
         with ThreadPoolExecutor(max_workers=2) as ex:
             f_am = ex.submit(search_apkmirror, new_session(), keyword)
-            f_ap = ex.submit(search_apkpure, new_session(), keyword)
-            am_list = [("🟠", n, u, None) for n, u in (f_am.result() or [])]
-            ap_list = [("🟢", n, u, None) for n, u in (f_ap.result() or [])]
-        # 排序键 (pos, source): AP(0) 优先 AM(1)，按位置交叉
-        # 效果：AP[0] AM[0] AP[1] AM[1] ...
-        keyed = (
-            [(i, 1, item) for i, item in enumerate(am_list)] +
-            [(i, 0, item) for i, item in enumerate(ap_list)]
-        )
-        keyed.sort(key=lambda x: (x[0], x[1]))
-        results = [x[2] for x in keyed]
-        if not results:
+            f_ap = ex.submit(search_apkpure, new_session(), keyword, 20)
+            am_list = f_am.result() or []
+            ap_list = f_ap.result() or []
+        if not am_list and not ap_list:
             bot.edit_message_text(
                 f"❌ 未找到 <b>{html.escape(keyword)}</b> 相关应用。",
                 message.chat.id, status_msg.message_id, parse_mode="HTML",
@@ -125,11 +138,13 @@ def _do_keyword_search(message: Message, keyword: str, mode: str) -> None:
             return
         sid = _uuid_mod.uuid4().hex[:8]
         _search_sessions[sid] = {
-            "results": results,
+            "am": am_list,
+            "ap": ap_list,
             "mode": mode,
             "chat_id": message.chat.id,
         }
-        markup = _build_search_keyboard(sid, results, 0)
+        default_src = "am" if am_list else "ap"
+        markup = _build_search_keyboard(sid, am_list, ap_list, default_src, 0)
         bot.edit_message_text(
             f"🔍 <b>{html.escape(keyword)}</b> 的搜索结果，请选择：",
             message.chat.id, status_msg.message_id,
@@ -673,7 +688,7 @@ def handle_dl_callback(call: CallbackQuery):
     threading.Thread(target=_download_once, args=(call.message.chat.id, apk_url, status_msg.message_id), daemon=True).start()
 
 
-@bot.callback_query_handler(func=lambda c: c.data in ("noop",) or c.data.startswith(("sp:", "sg:", "sc:")))
+@bot.callback_query_handler(func=lambda c: c.data in ("noop",) or c.data.startswith(("sp:", "sg:", "sc:", "st:")))
 def handle_search_callback(call: CallbackQuery):
     data = call.data
 
@@ -691,14 +706,30 @@ def handle_search_callback(call: CallbackQuery):
             pass
         return
 
-    if data.startswith("sg:"):
-        _, sid, page_str = data.split(":", 2)
+    if data.startswith("st:"):
+        # 切换 tab：st:{sid}:{src}
+        _, sid, src = data.split(":", 2)
         sess = _search_sessions.get(sid)
         if not sess:
             bot.answer_callback_query(call.id, "⚠️ 会话已过期。")
             return
         bot.answer_callback_query(call.id)
-        markup = _build_search_keyboard(sid, sess["results"], int(page_str))
+        markup = _build_search_keyboard(sid, sess["am"], sess["ap"], src, 0)
+        try:
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
+        except Exception:
+            pass
+        return
+
+    if data.startswith("sg:"):
+        # 翻页：sg:{sid}:{src}:{page}
+        _, sid, src, page_str = data.split(":", 3)
+        sess = _search_sessions.get(sid)
+        if not sess:
+            bot.answer_callback_query(call.id, "⚠️ 会话已过期。")
+            return
+        bot.answer_callback_query(call.id)
+        markup = _build_search_keyboard(sid, sess["am"], sess["ap"], src, int(page_str))
         try:
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
         except Exception:
@@ -706,25 +737,29 @@ def handle_search_callback(call: CallbackQuery):
         return
 
     if data.startswith("sp:"):
-        _, sid, idx_str = data.split(":", 2)
+        # 选中：sp:{sid}:{src}:{idx}
+        _, sid, src, idx_str = data.split(":", 3)
         sess = _search_sessions.pop(sid, None)
         if not sess:
             bot.answer_callback_query(call.id, "⚠️ 会话已过期。")
             return
-        icon, name, apk_url, _pkg = sess["results"][int(idx_str)]
+        name, apk_url = sess[src][int(idx_str)]
         mode = sess["mode"]
         chat_id = sess["chat_id"]
         bot.answer_callback_query(call.id)
         label = "✅ 已选择" if mode == "sub" else "⏬ 准备下载"
         try:
             bot.edit_message_text(
-                f"{label}：{icon} <b>{html.escape(name)}</b>",
+                f"{label}：<b>{html.escape(name)}</b>",
                 call.message.chat.id, call.message.message_id, parse_mode="HTML",
             )
         except Exception:
             pass
 
         if mode == "sub":
+            if src == "ap":
+                _safe_send(chat_id, "⚠️ APKPure 链接暂不支持订阅，请使用 /dl 直接下载。")
+                return
             added = add_subscription(chat_id, apk_url)
             dl_uid = _uuid_mod.uuid4().hex[:8]
             _dl_callbacks[dl_uid] = apk_url
