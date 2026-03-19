@@ -819,18 +819,24 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
                 if len(results) >= max_results:
                     break
 
-    # 降级：全页扫描
+    # 降级：全页扫描，同时匹配 2 段 app URL 和 3 段 APK 版本 URL（截断为 app URL）
     if not results:
+        _apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
         for a in soup.select("a[href]"):
             href = a.get("href", "")
             if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
-                url = BASE_URL + href.rstrip("/") + "/"
-                name = a.get_text(strip=True)
-                if url not in seen and name:
-                    seen.add(url)
-                    results.append((name, url))
-                    if len(results) >= max_results:
-                        break
+                app_path = href.rstrip("/")
+            elif m2 := _apk_ver_re.match(href):
+                app_path = m2.group(1)
+            else:
+                continue
+            url = BASE_URL + app_path + "/"
+            name = a.get_text(strip=True)
+            if url not in seen and name:
+                seen.add(url)
+                results.append((name, url))
+                if len(results) >= max_results:
+                    break
     return results
 
 
