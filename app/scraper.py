@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
@@ -642,43 +643,53 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
 
 
 def download_file(session: requests.Session, file_url: str, fallback_name: str) -> Path:
-    with session.get(file_url, stream=True, timeout=300, allow_redirects=True) as r:
-        r.raise_for_status()
+    r = session.get(file_url, stream=True, timeout=300, allow_redirects=True)
+    r.raise_for_status()
 
-        # 终极防御：如果服务器返回的是 HTML 网页，直接报错拦截
-        content_type = r.headers.get("Content-Type", "").lower()
-        if "text/html" in content_type:
-            # 读取前 2000 字符用于诊断（页面内容可能揭示失败原因）
-            html_preview = ""
-            try:
-                for chunk in r.iter_content(2000):
-                    html_preview = chunk.decode("utf-8", errors="replace")[:2000]
-                    break
-            except Exception:
-                pass
-            logger.error(
-                "download_file 拦截：URL=%s 返回 HTML\n  前2000字符：%s",
-                file_url, html_preview,
-            )
-            raise RuntimeError(
-                f"下载失败：获取到了 HTML 网页而非安装包 (Content-Type: {content_type})。"
-                "大概率触发了反爬或抓取了错误链接。"
-            )
+    # 终极防御：如果服务器返回的是 HTML 网页，直接报错拦截
+    content_type = r.headers.get("Content-Type", "").lower()
+    if "text/html" in content_type:
+        # 读取前 2000 字符用于诊断（页面内容可能揭示失败原因）
+        html_preview = ""
+        try:
+            for chunk in r.iter_content(2000):
+                html_preview = chunk.decode("utf-8", errors="replace")[:2000]
+                break
+        except Exception:
+            pass
+        logger.error(
+            "download_file 拦截：URL=%s 返回 HTML\n  前2000字符：%s",
+            file_url, html_preview,
+        )
+        raise RuntimeError(
+            f"下载失败：获取到了 HTML 网页而非安装包 (Content-Type: {content_type})。"
+            "大概率触发了反爬或抓取了错误链接。"
+        )
 
-        filename = None
-        cd = r.headers.get("Content-Disposition", "")
-        m = re.search(r'filename="?([^";]+)"?', cd)
-        if m:
-            filename = m.group(1).strip()
-        if not filename:
-            url_name = file_url.split("/")[-1].split("?")[0]
-            _SKIP = {"download", "download.php"}
-            filename = url_name if url_name and url_name.lower() not in _SKIP else fallback_name
-        out_path = DOWNLOAD_DIR / filename
-        with out_path.open("wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 512):
-                if chunk:
-                    f.write(chunk)
+    filename = None
+    cd = r.headers.get("Content-Disposition", "")
+    m = re.search(r'filename="?([^";]+)"?', cd)
+    if m:
+        filename = m.group(1).strip()
+    if not filename:
+        url_name = file_url.split("/")[-1].split("?")[0]
+        _SKIP = {"download", "download.php"}
+        filename = url_name if url_name and url_name.lower() not in _SKIP else fallback_name
+    # 加唯一后缀避免并发下载时不同线程写入同一文件路径
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    out_path = DOWNLOAD_DIR / f"{stem}_{uuid.uuid4().hex[:8]}{suffix}"
+    with out_path.open("wb") as f:
+        for chunk in r.iter_content(chunk_size=1024 * 512):
+            if chunk:
+                f.write(chunk)
+    # 防止 HTML 错误页绕过 Content-Type 检查被当作 APK 保存（如 0 字节响应）
+    file_size = out_path.stat().st_size
+    if file_size < 10_000:
+        out_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"下载文件异常过小（{file_size} 字节），可能是 HTML 错误页或空响应。URL={file_url}"
+        )
     return out_path
 
 
