@@ -369,54 +369,6 @@ def _extract_post_id(soup: BeautifulSoup, html: str) -> Optional[str]:
     return None
 
 
-def _follow_html_redirect(
-    session: requests.Session, url: str, referer: str
-) -> Optional[str]:
-    """请求 url；若返回二进制直接用该 URL；若返回 HTML，在里面查找真实 CDN 链接。
-    找到 CDN URL 则返回；找不到则返回 None（让调用方决定下一步）。"""
-    try:
-        r = session.get(
-            url, timeout=20, allow_redirects=True,
-            headers={"Referer": referer, "Accept": "*/*"},
-        )
-        ct = r.headers.get("Content-Type", "")
-        if "text/html" not in ct:
-            # 已经是二进制内容（APK / ZIP），直接用该 URL 下载
-            return url
-
-        # download.php 返回了 HTML——在里面寻找真实文件 URL
-        h = r.text
-        # 1. window.location / location.href = "..."
-        m = re.search(
-            r'(?:window\.location|location\.href)\s*=\s*["\']([^"\']+)["\']', h
-        )
-        if m:
-            return urljoin(BASE_URL, m.group(1))
-        # 2. <meta http-equiv="refresh" content="...url=...">
-        soup2 = BeautifulSoup(h, "lxml")
-        for meta in soup2.select("meta[http-equiv]"):
-            if "refresh" in (meta.get("http-equiv") or "").lower():
-                m = re.search(r"url=([^\s;,]+)", meta.get("content", ""), re.I)
-                if m:
-                    return urljoin(BASE_URL, m.group(1).strip("'\""))
-        # 3. <a href="...apk...">
-        for a in soup2.select("a[href]"):
-            href = a.get("href", "")
-            if re.search(r"\.(apk|apkm|xapk)(\?|$)", href, re.I):
-                return urljoin(BASE_URL, href)
-        # 4. 任意以 .apk/.apkm/.xapk 结尾（后跟 ? 或非字母）的 https:// 链接
-        #    注意：必须加断言排除 apkmirror.com 这类域名中的 ".apk"
-        m = re.search(
-            r'(https?://[^\s"\'<>]+\.(?:apk|apkm|xapk)(?:\?[^\s"\'<>]*)?)(?=["\'\s<>]|$)',
-            h,
-        )
-        if m:
-            return m.group(1)
-        # 找不到：打出前 2000 字符供分析（ERROR 级别，生产日志可见）
-        logger.error("download.php 返回 HTML，无法提取文件链接，前2000字符：\n%s", h[:2000])
-    except Exception as e:
-        logger.debug("_follow_html_redirect %s 失败：%s", url, e)
-    return None
 
 
 def _extract_js_str(html: str, key: str) -> Optional[str]:
@@ -498,57 +450,97 @@ def _fetch_apkm_download_actions(
     return list(dict.fromkeys(actions))
 
 
-def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> str:
-    r = session_get(session, download_page_url)
+def resolve_final_apk_url(session: requests.Session, download_page_url: str, referer_url: str = "") -> str:
+    # 核心：必须携带上一步 Variant 页面的 Referer，否则 APKMirror 隐藏下载信息
+    logger.info("请求 Download Page: %s", download_page_url)
+    req_headers = {"Referer": referer_url} if referer_url else {}
+    r = session_get(session, download_page_url, headers=req_headers)
     soup = BeautifulSoup(r.text, "lxml")
     html = r.text
     html_clean = html.replace("\\/", "/").replace("\\u002F", "/")
 
-    # 1. <a href> 中的 download.php 链接（旧版页面结构）
+    dl_php_url = None
+
+    # 1. 寻找直接暴露的 download.php 链接
     for a in soup.select('a[href*="download.php"]'):
-        return urljoin(BASE_URL, a.get("href"))
+        dl_php_url = urljoin(BASE_URL, a.get("href"))
+        break
 
-    # 2. "click here" 提示链接（含 key= 参数）
-    for a in soup.select("a[href]"):
-        text = a.get_text(" ", strip=True).lower()
-        href = a.get("href", "")
-        if "here" in text and "key=" in href:
-            return urljoin(BASE_URL, href)
+    if not dl_php_url:
+        for a in soup.select("a[href]"):
+            text = a.get_text(" ", strip=True).lower()
+            href = a.get("href", "")
+            if "here" in text and "key=" in href:
+                dl_php_url = urljoin(BASE_URL, href)
+                break
 
-    # 3. data-* 属性中的 download.php URL（JS 渲染时常见）
-    for tag in soup.find_all(True):
-        for val in (tag.attrs or {}).values():
-            if isinstance(val, str) and "download.php" in val:
-                return urljoin(BASE_URL, val)
+    if not dl_php_url:
+        m = re.search(r'(/wp-content/themes/APKMirror/download\.php[^"\'<>\s\\]+)', html_clean)
+        if m:
+            dl_php_url = urljoin(BASE_URL, m.group(1))
 
-    # 4. 原始 HTML 全文正则扫描（覆盖 <script> 中的内嵌 URL）
-    m = re.search(
-        r'(/wp-content/themes/APKMirror/download\.php[^"\'<>\s\\]+)',
-        html_clean,
-    )
-    if m:
-        return urljoin(BASE_URL, m.group(1))
-
-    # 5. 从 URL 中的 key= 参数 + 页面 WordPress Post ID 直接构造 download.php 链接
-    #    APKMirror 新版确认页完全 JS 渲染，但 WordPress body class 里有 postid-XXXX
-    key_m = re.search(r"[?&]key=([a-f0-9]+)", download_page_url)
-    if key_m:
-        dl_key = key_m.group(1)
-        forcebase = "&forcebaseapk=true" if "forcebaseapk" in download_page_url else ""
+    # 2. 页面无直链时，手动组装 download.php
+    if not dl_php_url:
+        key_m = re.search(r"[?&]key=([a-f0-9]+)", download_page_url)
         post_id = _extract_post_id(soup, html)
-        if post_id:
-            logger.debug("Step5 post_id=%s key=%s", post_id, dl_key)
-            dl_url = urljoin(
+        if key_m and post_id:
+            forcebase = "&forcebaseapk=true" if "forcebaseapk" in download_page_url else ""
+            dl_php_url = urljoin(
                 BASE_URL,
                 f"/wp-content/themes/APKMirror/download.php"
-                f"?id={post_id}&key={dl_key}{forcebase}",
+                f"?id={post_id}&key={key_m.group(1)}{forcebase}",
             )
-            # 验证：download.php 可能需要 Referer；若返回 HTML 则从里面提取 CDN URL
-            resolved = _follow_html_redirect(session, dl_url, referer=download_page_url)
-            if resolved:
-                return resolved
 
-    # 6. WordPress AJAX 解锁下载（终极防御版：暴力探索 + 特征打分 + 成功 action 记忆）
+    # 3. 解析 download.php，深度抽取 CDN 直链（带 download_page Referer）
+    if dl_php_url:
+        logger.info("抓取到 download.php，开始深度解剖获取 CDN 链接: %s", dl_php_url)
+        try:
+            r_dl = session.get(
+                dl_php_url,
+                headers={"Referer": download_page_url},
+                timeout=20,
+                allow_redirects=True,
+            )
+            ct = r_dl.headers.get("Content-Type", "").lower()
+            # 若服务器经 302 直接给了文件，返回落地 URL
+            if "application/" in ct or "zip" in ct or "octet-stream" in ct:
+                return r_dl.url
+            # HTML 过渡页：暴力抽 CDN 链接
+            h = r_dl.text
+            soup_dl = BeautifulSoup(h, "lxml")
+            # 策略A：APKMirror CDN 固定特征
+            cdn_m = re.search(
+                r'href=["\'](https?://[a-zA-Z0-9.-]*apkmirror\.com/wp-content/uploads/[^"\']+)["\']', h
+            )
+            if cdn_m:
+                return cdn_m.group(1)
+            # 策略B：Meta 自动刷新
+            for meta in soup_dl.select("meta[http-equiv]"):
+                if "refresh" in (meta.get("http-equiv") or "").lower():
+                    m2 = re.search(r"url=([^\s;,]+)", meta.get("content", ""), re.I)
+                    if m2:
+                        return urljoin(BASE_URL, m2.group(1).strip("'\""))
+            # 策略C：含 "here"/"download" 文字的 APK 链接
+            for a in soup_dl.select("a[href]"):
+                text = a.get_text(" ", strip=True).lower()
+                href = a.get("href", "")
+                if ("here" in text or "download" in text) and (
+                    "downloadr" in href or "uploads" in href
+                    or re.search(r"\.(apk|apkm|xapk)(\?|$)", href, re.I)
+                ):
+                    return urljoin(BASE_URL, href)
+            # 策略D：全局泛匹配
+            m3 = re.search(
+                r'(https?://[^\s"\'<>]+\.(?:apk|apkm|xapk)(?:\?[^\s"\'<>]*)?)(?=["\'\s<>]|$)',
+                h, re.I,
+            )
+            if m3:
+                return m3.group(1)
+            logger.warning("download.php 返回了无特征 HTML，将回退至 AJAX 暴力尝试")
+        except Exception as e:
+            logger.warning("请求 download.php 失败：%s", e)
+
+    # 4. AJAX 终极兜底（暴力探索 + 特征打分 + 成功 action 记忆）
     global _KNOWN_SUCCESSFUL_ACTION
     _key_m = re.search(r"[?&]key=([a-f0-9]+)", download_page_url)
     _post_id = _extract_post_id(soup, html)
@@ -561,7 +553,6 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
 
         _js_actions = _fetch_apkm_download_actions(session, html, download_page_url)
 
-        # 对提取出的字符串进行特征打分，最像 action 的排最前
         def action_score(s: str) -> int:
             score = 0
             s_lower = s.lower()
@@ -573,9 +564,7 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
             return -score
 
         _js_actions.sort(key=action_score)
-
         _actions = []
-        # 上次跑通的 action 置于绝对首位，实现秒匹配
         if _KNOWN_SUCCESSFUL_ACTION:
             _actions.append(_KNOWN_SUCCESSFUL_ACTION)
         _actions.extend([
@@ -586,14 +575,9 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
             "apkm_download",
         ])
         _actions.extend(_js_actions)
-        _actions = list(dict.fromkeys(_actions))
-        # 限制最多尝试前 30 个，防止误发过多请求被屏蔽
-        _actions = _actions[:30]
+        _actions = list(dict.fromkeys(_actions))[:30]
 
-        logger.info(
-            "Step6 ajaxurl=%s post_id=%s key=%s actions_to_try=%d",
-            _ajax_full, _post_id, _dl_key, len(_actions),
-        )
+        logger.info("Step4 AJAX 兜底，尝试 %d 个 Action", len(_actions))
         for _action in _actions:
             _data: dict = {
                 "action": _action,
@@ -606,14 +590,11 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
                 _data["_wpnonce"] = _nonce
             try:
                 _resp = session.post(
-                    _ajax_full,
-                    data=_data,
-                    timeout=10,
+                    _ajax_full, data=_data, timeout=10,
                     headers={
                         "Referer": download_page_url,
                         "Origin": BASE_URL,
                         "X-Requested-With": "XMLHttpRequest",
-                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                     },
                 )
                 _txt = _resp.text.strip()
@@ -625,46 +606,19 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
                         or (_d.get("data") or {}).get("url")
                     )
                     if _url:
-                        # 找到后立刻缓存到内存，后续任务直接走捷径
                         _KNOWN_SUCCESSFUL_ACTION = _action
                         logger.info("✅ 成功匹配到正确 AJAX action: %s", _action)
                         return _url.replace("\\/", "/")
             except Exception:
-                pass  # 忽略单次错误，继续尝试下一个
+                pass
 
-    # 诊断日志：尽可能多地打出页面信息供分析
-    title = soup.title.string if soup.title else "(no title)"
-    post_id_diag = _extract_post_id(soup, html)
-    nonce_diag = _extract_wp_nonce(html)
-    ajaxurl_diag = _extract_ajaxurl(html)
-    file_el = soup.find(id="file")
-    file_html = str(file_el)[:800] if file_el else "(#file 元素不存在)"
-    all_hrefs = [a.get("href", "") for a in soup.select("a[href]")][:20]
-    # 所有内联 script 标签的完整内容（不过滤关键词，1000 chars each）
-    script_snippets: list[str] = [
-        (tag.string or "")[:1000] for tag in soup.select("script") if tag.string
-    ]
-    # 外部 APKMirror JS 文件列表（用于确认 _fetch_apkm_download_action 搜索范围）
-    ext_scripts = [
-        t.get("src", "") for t in soup.select("script[src]")
-        if "apkmirror.com" in t.get("src", "")
-    ]
-    logger.error(
-        "无法解析下载直链。页面标题：%r  URL：%s\n"
-        "  post_id=%r  nonce=%r  ajaxurl=%r\n"
-        "  #file 元素：%s\n"
-        "  外部 APKMirror JS 文件：%s\n"
-        "  全部内联 script（前5个各1000字符）：%s\n"
-        "  前20个链接：%s",
-        title, download_page_url,
-        post_id_diag, nonce_diag, ajaxurl_diag,
-        file_html, ext_scripts, script_snippets[:5], all_hrefs,
-    )
-    raise RuntimeError("无法在中间页解析出真实的 APK 直链，可能是页面结构变更或触发了反爬")
+    raise RuntimeError("无法解析真实的 APK 直链，防盗链和反爬手段已阻断抓取。")
 
 
-def download_file(session: requests.Session, file_url: str, fallback_name: str) -> Path:
-    r = session.get(file_url, stream=True, timeout=300, allow_redirects=True)
+def download_file(session: requests.Session, file_url: str, fallback_name: str, referer: str = "") -> Path:
+    # 必须带上 Referer 以免下载被防盗链阻断（报 403 / HTML）
+    req_headers = {"Referer": referer} if referer else {}
+    r = session.get(file_url, stream=True, timeout=300, allow_redirects=True, headers=req_headers)
     r.raise_for_status()
 
     # 终极防御：如果服务器返回的是 HTML 网页，直接报错拦截
@@ -726,14 +680,16 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
     """解析 variant 的最终下载链接并下载，返回 (apk_path, sha256)。"""
     download_page = resolve_download_page(session, variant.variant_url)
     variant.download_page_url = download_page
-    final_url = resolve_final_apk_url(session, download_page)
+    # 传入 variant_url 作为 Referer，模拟真人点击跳转链路
+    final_url = resolve_final_apk_url(session, download_page, referer_url=variant.variant_url)
     variant.final_download_url = final_url
     logger.info("开始下载：%s", final_url)
     raw_name = f"{variant.app_name}_{variant.variant_label}"
     safe_name = re.sub(r'\s+', "_", re.sub(r'[\\/*?:"<>|]', "_", raw_name))
     ext = ".apkm" if variant.is_bundle else ".apk"
     fallback_name = f"{safe_name}{ext}"
-    apk_path = download_file(session, final_url, fallback_name)
+    # 传入 download_page 作为下载时的 Referer
+    apk_path = download_file(session, final_url, fallback_name, referer=download_page)
     file_hash = sha256_file(apk_path)
     logger.info("下载完成：%s (%.2f MB, sha256=%s...)",
                 apk_path.name, apk_path.stat().st_size / 1024 / 1024, file_hash[:12])
