@@ -456,57 +456,45 @@ def _extract_ajaxurl(html: str) -> str:
 
 # 运行时缓存：JS 文件 URL → 找到的 AJAX action 列表，避免重复拉取
 _download_action_cache: dict[str, list[str]] = {}
+# 记忆成功跑通的 action，以后直接优先用它，0 延迟！
+_KNOWN_SUCCESSFUL_ACTION: str = ""
 
 
 def _fetch_apkm_download_actions(
     session: requests.Session, page_html: str, referer: str
 ) -> list[str]:
-    """从确认页 HTML 内联代码及外部 APKMirror JS 文件中找到所有可能的 AJAX action 名。"""
+    """从确认页 HTML 内联代码及外部 JS 文件中，提取所有可能的字符串。"""
     actions = []
-    # 终极版正则：兼容 "action":"xxx", 'action':'xxx', action:"xxx" 各种情况（含压缩混淆）
-    pattern = r'(?:["\']?action["\']?)\s*[:=]\s*["\']([a-zA-Z0-9_-]+)["\']'
+    # 终极启发式正则：不再要求包含 action，直接提取所有 6~50 位、只有字母/数字/下划线的字符串
+    pattern = r'["\']([a-zA-Z_][a-zA-Z0-9_-]{4,49})["\']'
 
-    # 1. 先在当前页面的 HTML 内联脚本里找
-    found_inline = re.findall(pattern, page_html)
-    if found_inline:
-        logger.info("从 HTML 内联找到 %d 个候选 action: %s", len(found_inline), found_inline)
-        actions.extend(found_inline)
+    # 1. 搜索 HTML 内联脚本
+    soup = BeautifulSoup(page_html, "lxml")
+    for tag in soup.find_all("script"):
+        if not tag.get("src") and tag.string:
+            actions.extend(re.findall(pattern, tag.string))
 
-    # 2. 遍历外部 JS 文件
-    soup_js = BeautifulSoup(page_html, "lxml")
-    for tag in soup_js.select("script[src]"):
+    # 2. 搜索外部 JS 文件
+    for tag in soup.select("script[src]"):
         src = tag.get("src", "")
         if not src or "apkmirror.com" not in src:
             continue
-        # 跳过已知无关的公共库和广告库
+        # 跳过已知无关的公共库和广告库，只刮削核心 JS
         src_lower = src.lower()
         if any(lib in src_lower for lib in ("jquery", "lodash", "bootstrap", "recaptcha", "cmp.inmobi")):
             continue
         full_src = urljoin(BASE_URL, src)
         if full_src in _download_action_cache:
-            logger.debug("JS action cache hit: %s", full_src)
             actions.extend(_download_action_cache[full_src])
             continue
         try:
             r = session.get(full_src, timeout=10, headers={"Referer": referer})
-            js = r.text
-            found = re.findall(pattern, js)
-            # 兜底：正则未命中时，暴力提取 JS 中所有 10-40 位小写字母+下划线的字符串
-            if not found:
-                heuristics = re.findall(r'["\']([a-z_]{10,40})["\']', js)
-                if heuristics:
-                    logger.info("正则未命中，启用启发式兜底，提取 %d 个长字符串", len(heuristics))
-                    found = heuristics
-            if found:
-                _download_action_cache[full_src] = found
-                logger.info("从 JS 文件找到 %d 个候选 action (src=%s)", len(found), full_src)
-                actions.extend(found)
-            else:
-                _download_action_cache[full_src] = []
-                logger.info("JS 文件无 action 字段（HTTP %d，%d bytes）: %s",
-                            r.status_code, len(js), full_src)
+            found = re.findall(pattern, r.text)
+            _download_action_cache[full_src] = found
+            actions.extend(found)
         except Exception as e:
-            logger.info("获取 JS 文件失败 %s: %s", full_src, e)
+            logger.debug("获取 JS 文件失败 %s: %s", full_src, e)
+
     return list(dict.fromkeys(actions))
 
 
@@ -560,31 +548,51 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
             if resolved:
                 return resolved
 
-    # 6. WordPress AJAX 解锁下载
-    #    APKMirror 新版确认页由 JS 控制：倒计时结束后 JS 向 ajaxurl 发送解锁请求并拿到真实 URL。
-    #    我们在此复现该调用：先从外部 JS 文件提取正确的 action 名，再 fallback 到已知列表。
+    # 6. WordPress AJAX 解锁下载（终极防御版：暴力探索 + 特征打分 + 成功 action 记忆）
+    global _KNOWN_SUCCESSFUL_ACTION
     _key_m = re.search(r"[?&]key=([a-f0-9]+)", download_page_url)
     _post_id = _extract_post_id(soup, html)
     if _key_m and _post_id:
         _dl_key = _key_m.group(1)
         _forcebase = "true" if "forcebaseapk" in download_page_url else "false"
-        _ajax_base = _extract_ajaxurl(html)   # 页面里的 /wordpress/wp-admin/admin-ajax.php
+        _ajax_base = _extract_ajaxurl(html)
         _ajax_full = urljoin(BASE_URL, _ajax_base)
-        _nonce = _extract_wp_nonce(html)      # 可能是 None，无 nonce 也尝试
-        # 先从外部 JS 文件提取所有可能的 action；再 fallback 到旧版已知列表
+        _nonce = _extract_wp_nonce(html)
+
         _js_actions = _fetch_apkm_download_actions(session, html, download_page_url)
-        _actions = _js_actions + [
+
+        # 对提取出的字符串进行特征打分，最像 action 的排最前
+        def action_score(s: str) -> int:
+            score = 0
+            s_lower = s.lower()
+            if "apkm" in s_lower: score += 10
+            if "download" in s_lower: score += 10
+            if "ajax" in s_lower: score += 5
+            if "key" in s_lower: score += 5
+            if "gen" in s_lower: score += 5
+            return -score
+
+        _js_actions.sort(key=action_score)
+
+        _actions = []
+        # 上次跑通的 action 置于绝对首位，实现秒匹配
+        if _KNOWN_SUCCESSFUL_ACTION:
+            _actions.append(_KNOWN_SUCCESSFUL_ACTION)
+        _actions.extend([
             "apkm_generate_download_key_ajax",
             "generate_download_key_ajax",
             "get_download_key",
             "apkm_download_v2",
             "apkm_download",
-        ]
-        # 去重并保持尝试顺序
+        ])
+        _actions.extend(_js_actions)
         _actions = list(dict.fromkeys(_actions))
+        # 限制最多尝试前 30 个，防止误发过多请求被屏蔽
+        _actions = _actions[:30]
+
         logger.info(
-            "Step6 ajaxurl=%s post_id=%s key=%s nonce=%s actions=%s",
-            _ajax_full, _post_id, _dl_key, _nonce, _actions,
+            "Step6 ajaxurl=%s post_id=%s key=%s actions_to_try=%d",
+            _ajax_full, _post_id, _dl_key, len(_actions),
         )
         for _action in _actions:
             _data: dict = {
@@ -600,7 +608,7 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
                 _resp = session.post(
                     _ajax_full,
                     data=_data,
-                    timeout=15,
+                    timeout=10,
                     headers={
                         "Referer": download_page_url,
                         "Origin": BASE_URL,
@@ -609,8 +617,6 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
                     },
                 )
                 _txt = _resp.text.strip()
-                # INFO 级别，生产日志可见（之前是 DEBUG，无法看到）
-                logger.info("AJAX %s → HTTP %d: %s", _action, _resp.status_code, _txt[:300])
                 if _resp.ok and _txt.startswith("{"):
                     _d = _resp.json()
                     _url = (
@@ -619,9 +625,12 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
                         or (_d.get("data") or {}).get("url")
                     )
                     if _url:
+                        # 找到后立刻缓存到内存，后续任务直接走捷径
+                        _KNOWN_SUCCESSFUL_ACTION = _action
+                        logger.info("✅ 成功匹配到正确 AJAX action: %s", _action)
                         return _url.replace("\\/", "/")
-            except Exception as _e:
-                logger.debug("AJAX %s 异常：%s", _action, _e)
+            except Exception:
+                pass  # 忽略单次错误，继续尝试下一个
 
     # 诊断日志：尽可能多地打出页面信息供分析
     title = soup.title.string if soup.title else "(no title)"
