@@ -924,7 +924,11 @@ def handle_app_search_callback(call: CallbackQuery):
             except Exception:
                 pass
             pkg = apkpure_url.rstrip("/").split("/")[-1]
-            am_url = resolve_package_to_apkmirror_url(new_session(), pkg)
+            try:
+                am_url = resolve_package_to_apkmirror_url(new_session(), pkg)
+            except Exception:
+                logger.warning("APKMirror 查询失败（pkg=%s），视为未收录", pkg)
+                am_url = None
             uid = _uuid_mod.uuid4().hex[:8]
             _app_actions[uid] = {"name": name, "ap_url": apkpure_url, "am_url": am_url}
             has_am = bool(am_url)
