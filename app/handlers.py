@@ -2,6 +2,7 @@ import html
 import logging
 import re
 import threading
+import uuid as _uuid_mod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,12 @@ from zoneinfo import ZoneInfo
 
 import telebot
 from telebot import TeleBot
-from telebot.types import Message
+from telebot.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from config import BOT_TOKEN, CHECK_INTERVAL, LOCAL_BOT_API_URL, OWNER_ID, TZ
 from database import (
@@ -47,6 +53,7 @@ if LOCAL_BOT_API_URL:
 
 bot = TeleBot(BOT_TOKEN, parse_mode="HTML")
 check_lock = threading.Lock()
+_dl_callbacks: dict[str, str] = {}   # uuid → apk_url
 
 
 def _safe_send(chat_id: int, text: str, **kwargs) -> None:
@@ -114,36 +121,9 @@ def _send_apk_to_user(chat_id: int, variant: Variant, apk_path: Path, sha256: st
         )
 
 
-def _send_current_version(chat_id: int, apk_url: str) -> None:
-    """首次订阅时：抓取当前最新版并发给该用户，若该 URL 无版本记录则设置基线。"""
-    apk_path: Optional[Path] = None
-    try:
-        session = new_session()
-        variant = scrape_and_pick(session, apk_url)
-        apk_path, sha256 = resolve_and_download(session, variant)
-        _send_apk_to_user(chat_id, variant, apk_path, sha256)
-        if not get_apk_version(apk_url):
-            update_apk_version(
-                apk_url,
-                last_variant_url=variant.variant_url,
-                last_version_name=variant.release_version_name,
-                last_version_code=variant.version_code,
-                last_sha256=sha256,
-                last_type=variant.type,
-                last_checked_at=now_iso(),
-                last_pushed_at=now_iso(),
-            )
-    except Exception as e:
-        logger.exception("首次推送失败：chat_id=%s url=%s", chat_id, apk_url)
-        _safe_send(chat_id, f"❌ 获取失败：{html.escape(str(e))}")
-    finally:
-        if apk_path is not None:
-            cleanup_after_push(apk_path)
-
 
 def _check_single_url(apk_url: str) -> str:
-    """检查单个 URL，有新版则推送给所有订阅者，返回状态描述。"""
-    apk_path: Optional[Path] = None
+    """检查单个 URL，有新版则通知订阅者（带下载按钮），返回状态描述。"""
     try:
         session = new_session()
 
@@ -163,20 +143,32 @@ def _check_single_url(apk_url: str) -> str:
         # ── RSS 显示有新版本，或首次检查，或 RSS 不可用 → 走完整流程 ────────
 
         variant = scrape_and_pick(session, apk_url)
-        apk_path, sha256 = resolve_and_download(session, variant)
 
-        if not is_new_version(apk_url, variant.variant_url, variant.version_code, sha256, variant.type):
+        if not is_new_version(apk_url, variant.variant_url, variant.version_code, "", variant.type):
             update_apk_version(apk_url, last_checked_at=now_iso())
             return f"无更新：{html.escape(apk_url.rstrip('/').split('/')[-1])}（{html.escape(variant.release_version_name)}）"
+
+        # 有新版本 — 发通知 + 下载按钮，不自动推送 APK
+        uid = _uuid_mod.uuid4().hex[:8]
+        _dl_callbacks[uid] = apk_url
+
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("⏬ 下载 APK", callback_data=f"dl:{uid}"))
+
+        msg_text = (
+            f"🆕 <b>{html.escape(variant.app_name)}</b> 有新版本\n\n"
+            f"版本：<code>{html.escape(variant.release_version_name)}</code>\n"
+            f"来源：<a href=\"{variant.release_url}\">APKMirror</a>"
+        )
 
         subscribers = get_subscribers(apk_url)
         ok = 0
         for sub_chat_id in subscribers:
             try:
-                _send_apk_to_user(sub_chat_id, variant, apk_path, sha256)
+                bot.send_message(sub_chat_id, msg_text, reply_markup=markup)
                 ok += 1
             except Exception:
-                logger.exception("推送给 chat_id=%s 失败", sub_chat_id)
+                logger.exception("通知 chat_id=%s 失败", sub_chat_id)
 
         now = now_iso()
         update_apk_version(
@@ -184,7 +176,7 @@ def _check_single_url(apk_url: str) -> str:
             last_variant_url=variant.variant_url,
             last_version_name=variant.release_version_name,
             last_version_code=variant.version_code,
-            last_sha256=sha256,
+            last_sha256="",
             last_type=variant.type,
             last_checked_at=now,
             last_pushed_at=now,
@@ -192,15 +184,12 @@ def _check_single_url(apk_url: str) -> str:
         app_label = html.escape(apk_url.rstrip("/").split("/")[-1])
         return (
             f"✅ {app_label} 有新版本 {html.escape(variant.release_version_name)}"
-            f"，已推送 {ok}/{len(subscribers)} 人"
+            f"，已通知 {ok}/{len(subscribers)} 人"
         )
     except Exception as e:
         logger.exception("检查失败：%s", apk_url)
         app_label = html.escape(apk_url.rstrip("/").split("/")[-1])
         return f"❌ 检查失败 {app_label}：{html.escape(str(e))}"
-    finally:
-        if apk_path is not None:
-            cleanup_after_push(apk_path)
 
 
 def run_check_all(triggered_by: Optional[int] = None) -> None:
@@ -317,16 +306,16 @@ def handle_sub(message: Message):
         return
 
     added = add_subscription(message.chat.id, url)
+
+    dl_uid = _uuid_mod.uuid4().hex[:8]
+    _dl_callbacks[dl_uid] = url
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("⏬ 下载 APK", callback_data=f"dl:{dl_uid}"))
+
     if not added:
-        bot.reply_to(message, "⏬ 已订阅该应用。正在为您手动抓取当前最新版本，请稍等……")
-        threading.Thread(target=_send_current_version, args=(message.chat.id, url), daemon=True).start()
+        bot.reply_to(message, "⚠️ 已订阅该应用。", reply_markup=markup)
         return
-    bot.reply_to(message, f"✅ 订阅成功！正在获取当前最新版本，请稍等……\n<code>{html.escape(url)}</code>")
-    threading.Thread(
-        target=_send_current_version,
-        args=(message.chat.id, url),
-        daemon=True,
-    ).start()
+    bot.reply_to(message, f"✅ 订阅成功！\n<code>{html.escape(url)}</code>", reply_markup=markup)
 
 
 @bot.message_handler(commands=["dl"])
@@ -507,3 +496,19 @@ def handle_help(message: Message):
         "/user — 查看白名单\n"
         "/help — 显示本帮助",
     )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("dl:"))
+def handle_dl_callback(call: CallbackQuery):
+    uid = call.data[3:]
+    apk_url = _dl_callbacks.get(uid)
+    if not apk_url:
+        bot.answer_callback_query(call.id, "链接已过期，请等待下次更新通知。")
+        return
+    bot.answer_callback_query(call.id, "⏬ 开始下载……")
+    bot.send_message(
+        call.message.chat.id,
+        f"⏬ 正在下载，请稍等……\n<code>{html.escape(apk_url)}</code>",
+        parse_mode="HTML",
+    )
+    threading.Thread(target=_download_once, args=(call.message.chat.id, apk_url), daemon=True).start()
