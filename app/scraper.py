@@ -873,10 +873,12 @@ def search_apkpure(session: requests.Session, keyword: str, max_results: int = 5
 
 
 def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 20) -> list[tuple[str, str]]:
-    """主路径：APKMirror 直搜；无结果时 fallback：取 APKPure 第一条结果名称再搜 APKMirror。"""
-    results = _search_apkmirror_direct(session, keyword, max_results)
-    if results:
-        return results
+    """主路径：APKMirror 直搜；无结果或关键词含非 ASCII（如中文）时 fallback：取 APKPure 第一条结果名称再搜 APKMirror。"""
+    # APKMirror 不识别非 ASCII 关键词（如中文），直接走 fallback 避免返回无关结果
+    if keyword.isascii():
+        results = _search_apkmirror_direct(session, keyword, max_results)
+        if results:
+            return results
 
     # Fallback：用 APKPure 第一条结果的应用名搜 APKMirror
     ap_hits = search_apkpure(new_session(), keyword, 1)
