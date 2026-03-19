@@ -66,9 +66,6 @@ _search_sessions: dict[str, dict] = {}    # sid → {results, mode, chat_id}
 # 标准包名：至少含一个点，仅 ASCII 字母数字 + _ + .
 _PKG_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$')
 _SEARCH_PAGE_SIZE = 5
-_APKPURE_PKG_RE = re.compile(
-    r"https?://apkpure\.com/[^/]+/([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+)$"
-)
 
 
 def _is_keyword(s: str) -> bool:
@@ -85,8 +82,7 @@ def _build_search_keyboard(sid: str, results: list, page: int) -> InlineKeyboard
     start = page * _SEARCH_PAGE_SIZE
     markup = InlineKeyboardMarkup()
     for i, (icon, name, _url, pkg) in enumerate(results[start:start + _SEARCH_PAGE_SIZE]):
-        label = f"{icon} {name} - {pkg}" if pkg else f"{icon} {name}"
-        markup.add(InlineKeyboardButton(label, callback_data=f"sp:{sid}:{start + i}"))
+        markup.add(InlineKeyboardButton(f"{icon} {name}", callback_data=f"sp:{sid}:{start + i}"))
     if pages > 1:
         nav = []
         if page > 0:
@@ -112,10 +108,7 @@ def _do_keyword_search(message: Message, keyword: str, mode: str) -> None:
             f_am = ex.submit(search_apkmirror, new_session(), keyword)
             f_ap = ex.submit(search_apkpure, new_session(), keyword)
             am_list = [("🟠", n, u, None) for n, u in (f_am.result() or [])]
-            ap_list = [
-                ("🟢", n, u, (m.group(1) if (m := _APKPURE_PKG_RE.match(u)) else None))
-                for n, u in (f_ap.result() or [])
-            ]
+            ap_list = [("🟢", n, u, None) for n, u in (f_ap.result() or [])]
         # 合并：按相关性升序 + 同分时交叉排列（APKMirror 先），显示全部结果
         def _rel(name: str) -> int:
             n, kw = name.lower(), keyword.lower()
