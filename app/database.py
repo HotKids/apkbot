@@ -35,7 +35,8 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS whitelist (
                 user_id    INTEGER PRIMARY KEY,
-                added_at   TEXT NOT NULL
+                added_at   TEXT NOT NULL,
+                remark     TEXT
             );
 
             CREATE TABLE IF NOT EXISTS subscriptions (
@@ -58,24 +59,28 @@ def init_db() -> None:
             );
             """
         )
-        # 兼容旧数据库：补充 last_type 列（已存在则忽略）
-        try:
-            conn.execute("ALTER TABLE apk_versions ADD COLUMN last_type TEXT")
-        except sqlite3.OperationalError:
-            pass
+        # 兼容旧数据库：补充列（已存在则忽略）
+        for sql in [
+            "ALTER TABLE apk_versions ADD COLUMN last_type TEXT",
+            "ALTER TABLE whitelist ADD COLUMN remark TEXT",
+        ]:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass
 
 
 # ---------------------------------------------------------------------------
 # 白名单
 # ---------------------------------------------------------------------------
 
-def add_to_whitelist(user_id: int) -> bool:
+def add_to_whitelist(user_id: int, remark: str = "") -> bool:
     """添加用户到白名单，返回 True 表示新增，False 表示已存在。"""
     with db_lock, db_conn() as conn:
         try:
             conn.execute(
-                "INSERT INTO whitelist(user_id, added_at) VALUES(?, ?)",
-                (user_id, now_iso()),
+                "INSERT INTO whitelist(user_id, added_at, remark) VALUES(?, ?, ?)",
+                (user_id, now_iso(), remark or None),
             )
             return True
         except sqlite3.IntegrityError:
@@ -89,12 +94,13 @@ def remove_from_whitelist(user_id: int) -> bool:
         return cur.rowcount > 0
 
 
-def get_whitelist() -> list[int]:
+def get_whitelist() -> list[tuple[int, str]]:
+    """返回白名单列表，每项为 (user_id, remark)。"""
     with db_lock, db_conn() as conn:
         rows = conn.execute(
-            "SELECT user_id FROM whitelist ORDER BY added_at"
+            "SELECT user_id, remark FROM whitelist ORDER BY added_at"
         ).fetchall()
-        return [r["user_id"] for r in rows]
+        return [(r["user_id"], r["remark"] or "") for r in rows]
 
 
 def is_in_whitelist(user_id: int) -> bool:
