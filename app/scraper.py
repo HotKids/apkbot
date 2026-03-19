@@ -752,6 +752,9 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
 # 关键词多结果搜索
 # ---------------------------------------------------------------------------
 
+_APKMIRROR_APP_RE = re.compile(r"^https?://(?:www\.)?apkmirror\.com(/apk/[^/]+/[^/]+)/?$")
+
+
 def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 5) -> list[tuple[str, str]]:
     """关键词搜索 APKMirror，返回 [(app_name, base_url), …]，最多 max_results 条。"""
     search_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}"
@@ -762,6 +765,17 @@ def search_apkmirror(session: requests.Session, keyword: str, max_results: int =
     soup = BeautifulSoup(r.text, "lxml")
     results: list[tuple[str, str]] = []
     seen: set[str] = set()
+
+    # APKMirror 有时对关键词直接重定向到 app 页面（如 "doubao" → /apk/bytedance/doubao/）
+    m = _APKMIRROR_APP_RE.match(r.url)
+    if m:
+        app_url = BASE_URL + m.group(1) + "/"
+        # 从页面标题或 h1 提取应用名
+        h1 = soup.select_one("h1.app-title, h1")
+        name = h1.get_text(strip=True) if h1 else keyword
+        return [(name, app_url)]
+
+    # 正常搜索结果页：a.fontBlack 含应用链接
     for a in soup.select("a.fontBlack"):
         href = a.get("href", "")
         if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
@@ -772,6 +786,20 @@ def search_apkmirror(session: requests.Session, keyword: str, max_results: int =
                 results.append((name, full_url))
                 if len(results) >= max_results:
                     break
+
+    # 降级：全页扫描（CSS 选择器变更时兜底）
+    if not results:
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
+                full_url = BASE_URL + href.split("?")[0].rstrip("/") + "/"
+                name = a.get_text(strip=True)
+                if full_url not in seen and name:
+                    seen.add(full_url)
+                    results.append((name, full_url))
+                    if len(results) >= max_results:
+                        break
+
     return results
 
 
