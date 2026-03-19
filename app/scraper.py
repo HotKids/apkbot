@@ -10,6 +10,7 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import requests
+from pypinyin import lazy_pinyin
 try:
     from curl_cffi import requests as _cffi_requests
     _CURL_CFFI_AVAILABLE = True
@@ -800,7 +801,7 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
     seen: set[str] = set()
 
     # 无匹配时页面有"No results found"提示，但侧边栏仍有热门应用链接（fontBlack）
-    # 检测到无结果立即返回空，触发 fallback，避免抓到侧边栏热门应用
+    # 任何关键词无结果时立即返回空，避免抓到侧边栏热门应用
     if "No results found matching your query" in r.text:
         return []
 
@@ -879,13 +880,39 @@ def search_apkpure(session: requests.Session, keyword: str, max_results: int = 5
     return results
 
 
-def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 20) -> list[tuple[str, str]]:
-    """主路径：APKMirror 直搜；无结果时 fallback：取 APKPure 第一条结果名称再搜 APKMirror。"""
-    results = _search_apkmirror_direct(session, keyword, max_results)
-    if results:
-        return results
+_HAS_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
 
-    # Fallback：用 APKPure 第一条结果的应用名搜 APKMirror
+
+def _to_pinyin(text: str) -> str:
+    """将汉字转为拼音连写（无声调），非汉字字符保留原样。"""
+    return "".join(lazy_pinyin(text))
+
+
+def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 20) -> list[tuple[str, str]]:
+    """主路径：APKMirror 直搜；含汉字时同时搜拼音；两者均无结果时 fallback APKPure。"""
+    if _HAS_CJK_RE.search(keyword):
+        pinyin_kw = _to_pinyin(keyword)
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_zh = ex.submit(_search_apkmirror_direct, session, keyword, max_results)
+            f_py = ex.submit(_search_apkmirror_direct, new_session(), pinyin_kw, max_results)
+        zh_res = f_zh.result() or []
+        py_res = f_py.result() or []
+        seen: set[str] = set()
+        results: list[tuple[str, str]] = []
+        for name, url in zh_res + py_res:
+            if url not in seen:
+                seen.add(url)
+                results.append((name, url))
+                if len(results) >= max_results:
+                    break
+        if results:
+            return results
+    else:
+        results = _search_apkmirror_direct(session, keyword, max_results)
+        if results:
+            return results
+
+    # Fallback：取 APKPure 第一条结果名称再搜 APKMirror
     ap_hits = search_apkpure(new_session(), keyword, 1)
     if not ap_hits:
         return []
