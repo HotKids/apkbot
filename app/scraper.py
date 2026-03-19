@@ -754,6 +754,16 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
 # ---------------------------------------------------------------------------
 
 _APKMIRROR_APP_RE = re.compile(r"^https?://(?:www\.)?apkmirror\.com(/apk/[^/]+/[^/]+)/?$")
+# 用于归一化 APKMirror 应用名称以去重：剥离版本号后缀和括号变体注释
+_AM_VER_SUFFIX_RE = re.compile(r'\s+\d[\d.]*(?:\s+(?:beta|alpha|rc\w*))?$', re.IGNORECASE)
+_AM_VARIANT_RE = re.compile(r'\s*\([^)]+\)\s*')
+
+
+def _norm_am_name(name: str) -> str:
+    """剥离版本号和括号变体后小写，用于名称去重。"""
+    name = _AM_VER_SUFFIX_RE.sub('', name)
+    name = _AM_VARIANT_RE.sub(' ', name).strip()
+    return name.lower()
 
 
 def _pkg_to_apkmirror(session: requests.Session, package_name: str) -> tuple[str, str] | None:
@@ -807,8 +817,12 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
         name = h1.get_text(strip=True) if h1 else keyword
         return [(name, app_url)]
 
-    # APKS tab：a.fontBlack 为版本页（3 段），截断为 app URL 后去重
+    # APKS tab：a.fontBlack 为版本页（3 段），截断为 app URL 后双重去重
+    # seen_urls：精确 URL 去重（同一 app 不同版本）
+    # seen_names：归一化名称去重（同一 app 不同变体，如 Wear OS / Android TV）
     _apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
+    seen_urls: set[str] = set()
+    seen_names: set[str] = set()
     for a in soup.select("a.fontBlack"):
         href = a.get("href", "")
         if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
@@ -819,8 +833,10 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
             continue
         url = BASE_URL + app_path + "/"
         name = a.get_text(strip=True)
-        if url not in seen and name:
-            seen.add(url)
+        norm = _norm_am_name(name)
+        if url not in seen_urls and norm not in seen_names and name:
+            seen_urls.add(url)
+            seen_names.add(norm)
             results.append((name, url))
             if len(results) >= max_results:
                 break
