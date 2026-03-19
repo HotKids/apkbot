@@ -151,7 +151,7 @@ def _check_single_url(apk_url: str) -> str:
 
         if not is_new_version(apk_url, variant.variant_url, variant.version_code, "", variant.type):
             update_apk_version(apk_url, last_checked_at=now_iso())
-            return f"无更新：{html.escape(apk_url.rstrip('/').split('/')[-1])}（{html.escape(variant.release_version_name)}）"
+            return f"无更新：{html.escape(variant.app_name)}（{html.escape(variant.release_version_name)}）"
 
         # 有新版本 — 发通知 + 下载按钮，不自动推送 APK
         uid = _uuid_mod.uuid4().hex[:8]
@@ -186,9 +186,8 @@ def _check_single_url(apk_url: str) -> str:
             last_checked_at=now,
             last_pushed_at=now,
         )
-        app_label = html.escape(apk_url.rstrip("/").split("/")[-1])
         return (
-            f"✅ {app_label} 有新版本 {html.escape(variant.release_version_name)}"
+            f"✅ {html.escape(variant.app_name)} 有新版本 {html.escape(variant.release_version_name)}"
             f"，已通知 {ok}/{len(subscribers)} 人"
         )
     except Exception as e:
@@ -326,12 +325,12 @@ def handle_sub(message: Message):
     if len(parts) < 2:
         bot.reply_to(
             message,
-            "用法：/sub &lt;链接或包名&gt;\n\n支持以下格式：\n"
-            "1. <b>APKMirror 链接</b>\n"
-            "   <code>https://www.apkmirror.com/apk/…</code>\n"
-            "2. <b>Google Play 链接</b>\n"
-            "   <code>https://play.google.com/store/apps/details?id=…</code>\n"
-            "3. <b>应用包名</b>（如 <code>com.android.chrome</code>）",
+            "用法：/sub &lt;链接或包名&gt;\n\n"
+            "订阅应用更新，有新版本时自动通知。支持以下格式：\n"
+            "APKMirror 链接：<code>https://www.apkmirror.com/apk/…</code>\n"
+            "Play Store 链接：<code>https://play.google.com/store/apps/details?id=…</code>\n"
+            "包名：          <code>com.android.chrome</code>",
+            parse_mode="HTML",
         )
         return
 
@@ -392,13 +391,13 @@ def handle_unsub(message: Message):
     if len(parts) == 1:
         subs = get_subscriptions(message.chat.id)
         if not subs:
-            bot.reply_to(message, "当前无订阅。")
+            bot.reply_to(message, "当前无订阅。使用 /sub &lt;链接或包名&gt; 添加。")
             return
         lines = "\n".join(f"• <code>{html.escape(s)}</code>" for s in subs)
         bot.reply_to(
             message,
             f"用法：\n"
-            f"  /unsub &lt;url&gt; — 取消指定订阅\n"
+            f"  /unsub &lt;链接或包名&gt; — 取消指定订阅\n"
             f"  /unsub all — 取消全部订阅\n\n"
             f"当前订阅（{len(subs)} 个）：\n{lines}",
         )
@@ -421,7 +420,7 @@ def handle_sublist(message: Message):
         return
     subs = get_subscriptions(message.chat.id)
     if not subs:
-        bot.reply_to(message, "当前无订阅。使用 /sub &lt;url&gt; 添加。")
+        bot.reply_to(message, "当前无订阅。使用 /sub &lt;链接或包名&gt; 添加。")
         return
     session = new_session()
     lines = "\n".join(
@@ -553,7 +552,7 @@ def handle_dl_callback(call: CallbackQuery):
     uid = call.data[3:]
     apk_url = _dl_callbacks.get(uid)
     if not apk_url:
-        bot.answer_callback_query(call.id, "链接已过期，请等待下次更新通知。")
+        bot.answer_callback_query(call.id, "⚠️ 链接已过期，请等待下次更新通知。")
         return
     bot.answer_callback_query(call.id, "⏬ 开始下载……")
     status_msg = bot.send_message(
