@@ -749,7 +749,58 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
 
 
 # ---------------------------------------------------------------------------
-# 包名 → APKMirror URL 解析
+# 关键词多结果搜索
+# ---------------------------------------------------------------------------
+
+def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 5) -> list[tuple[str, str]]:
+    """关键词搜索 APKMirror，返回 [(app_name, base_url), …]，最多 max_results 条。"""
+    search_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}"
+    try:
+        r = session_get(session, search_url)
+    except Exception:
+        return []
+    soup = BeautifulSoup(r.text, "lxml")
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for a in soup.select("a.fontBlack"):
+        href = a.get("href", "")
+        if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
+            full_url = BASE_URL + href.split("?")[0].rstrip("/") + "/"
+            name = a.get_text(strip=True)
+            if full_url not in seen and name:
+                seen.add(full_url)
+                results.append((name, full_url))
+                if len(results) >= max_results:
+                    break
+    return results
+
+
+def search_apkpure(session: requests.Session, keyword: str, max_results: int = 5) -> list[tuple[str, str]]:
+    """关键词搜索 APKPure，返回 [(app_name, url), …]，最多 max_results 条。"""
+    search_url = f"{_APKPURE_BASE}/search?q={requests.utils.quote(keyword)}"
+    try:
+        r = session_get(session, search_url)
+    except Exception:
+        return []
+    soup = BeautifulSoup(r.text, "lxml")
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for a in soup.select("a.first-info, .search-row .title a, a.title"):
+        href = a.get("href", "")
+        if not href or not re.match(r"^/[^/]+/[^/]+$", href):
+            continue
+        full_url = _APKPURE_BASE + href.rstrip("/")
+        name = a.get_text(strip=True)
+        if full_url not in seen and name:
+            seen.add(full_url)
+            results.append((name, full_url))
+            if len(results) >= max_results:
+                break
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 包名 → APKMirror / APKPure URL 解析
 # ---------------------------------------------------------------------------
 
 def resolve_package_to_apkmirror_url(session: requests.Session, package_name: str) -> Optional[str]:

@@ -48,6 +48,8 @@ from scraper import (
     resolve_package_to_apkpure_url,
     scrape_and_pick,
     scrape_and_pick_apkpure,
+    search_apkmirror,
+    search_apkpure,
 )
 from selector import Variant
 
@@ -58,7 +60,95 @@ if LOCAL_BOT_API_URL:
 
 bot = TeleBot(BOT_TOKEN, parse_mode="HTML")
 check_lock = threading.Lock()
-_dl_callbacks: dict[str, str] = {}   # uuid → apk_url
+_dl_callbacks: dict[str, str] = {}        # uuid → apk_url
+_search_sessions: dict[str, dict] = {}    # sid → {results, mode, chat_id}
+
+# 标准包名：至少含一个点，仅 ASCII 字母数字 + _ + .
+_PKG_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$')
+_SEARCH_PAGE_SIZE = 5
+
+
+def _is_keyword(s: str) -> bool:
+    """是否为宽泛关键词（非 URL、非标准包名）。"""
+    if s.startswith("http"):
+        return False
+    return not _PKG_RE.match(s)
+
+
+def _build_search_keyboard(sid: str, results: list, page: int) -> InlineKeyboardMarkup:
+    """构建搜索结果分页键盘。results 元素为 (icon, name, url)。"""
+    total = len(results)
+    pages = max(1, (total + _SEARCH_PAGE_SIZE - 1) // _SEARCH_PAGE_SIZE)
+    start = page * _SEARCH_PAGE_SIZE
+    markup = InlineKeyboardMarkup()
+    for i, (icon, name, _url) in enumerate(results[start:start + _SEARCH_PAGE_SIZE]):
+        markup.add(InlineKeyboardButton(
+            f"{icon} {name}",
+            callback_data=f"sp:{sid}:{start + i}",
+        ))
+    prev_btn = InlineKeyboardButton(
+        "◀ 上一页" if page > 0 else "　",
+        callback_data=f"sg:{sid}:{page - 1}" if page > 0 else "noop",
+    )
+    page_btn = InlineKeyboardButton(f"📄 {page + 1}/{pages}", callback_data="noop")
+    next_btn = InlineKeyboardButton(
+        "下一页 ▶" if page < pages - 1 else "　",
+        callback_data=f"sg:{sid}:{page + 1}" if page < pages - 1 else "noop",
+    )
+    markup.row(prev_btn, page_btn, next_btn)
+    markup.add(InlineKeyboardButton("❌ 取消", callback_data=f"sc:{sid}"))
+    return markup
+
+
+def _do_keyword_search(message: Message, keyword: str, mode: str) -> None:
+    """在后台线程中执行关键词搜索并展示结果键盘。"""
+    try:
+        status_msg = bot.reply_to(
+            message, f"🔍 正在搜索 <b>{html.escape(keyword)}</b>……", parse_mode="HTML"
+        )
+    except Exception:
+        return
+    try:
+        session = new_session()
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_am = ex.submit(search_apkmirror, session, keyword)
+            f_ap = ex.submit(search_apkpure, session, keyword)
+            am_list = [("🟠", n, u) for n, u in (f_am.result() or [])]
+            ap_list = [("🟢", n, u) for n, u in (f_ap.result() or [])]
+        # 交替合并（相关性混排）
+        results: list = []
+        for i in range(max(len(am_list), len(ap_list))):
+            if i < len(am_list):
+                results.append(am_list[i])
+            if i < len(ap_list):
+                results.append(ap_list[i])
+        if not results:
+            bot.edit_message_text(
+                f"❌ 未找到 <b>{html.escape(keyword)}</b> 相关应用。",
+                message.chat.id, status_msg.message_id, parse_mode="HTML",
+            )
+            return
+        sid = _uuid_mod.uuid4().hex[:8]
+        _search_sessions[sid] = {
+            "results": results,
+            "mode": mode,
+            "chat_id": message.chat.id,
+        }
+        markup = _build_search_keyboard(sid, results, 0)
+        bot.edit_message_text(
+            f"🔍 <b>{html.escape(keyword)}</b> 的搜索结果，请选择：",
+            message.chat.id, status_msg.message_id,
+            parse_mode="HTML", reply_markup=markup,
+        )
+    except Exception as e:
+        logger.exception("关键词搜索失败：keyword=%s", keyword)
+        try:
+            bot.edit_message_text(
+                f"❌ 搜索失败：{html.escape(str(e))}",
+                message.chat.id, status_msg.message_id, parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
 
 def _safe_send(chat_id: int, text: str, **kwargs) -> None:
@@ -138,27 +228,36 @@ def _check_single_url(apk_url: str) -> str:
     """检查单个 URL，有新版则通知订阅者（带下载按钮），返回状态描述。"""
     try:
         session = new_session()
+        is_apkpure = "apkpure" in apk_url
 
-        # ── 快速 RSS 预检：无更新时直接返回，避免触发完整抓取 ──────────────
-        rss_release_url = fetch_rss_latest_release_url(session, apk_url)
-        if rss_release_url:
+        if is_apkpure:
+            # APKPure：无 RSS，直接抓页面，按版本号字符串判断是否有更新
+            variant = scrape_and_pick_apkpure(session, apk_url)
             db_row = get_apk_version(apk_url)
-            if db_row and db_row["last_variant_url"]:
-                last_release_path = _release_path_from_variant_url(db_row["last_variant_url"])
-                rss_path = rss_release_url.split("apkmirror.com")[-1]
-                if rss_path == last_release_path:
-                    update_apk_version(apk_url, last_checked_at=now_iso())
-                    app_label = html.escape(apk_url.rstrip("/").split("/")[-1])
-                    stored_ver = db_row["last_version_name"] or "—"
-                    logger.info("RSS 预检：%s 无更新（%s）", apk_url, stored_ver)
-                    return f"无更新：{app_label}（{html.escape(stored_ver)}）"
-        # ── RSS 显示有新版本，或首次检查，或 RSS 不可用 → 走完整流程 ────────
+            if db_row and db_row["last_version_name"] and \
+                    db_row["last_version_name"] == variant.release_version_name:
+                update_apk_version(apk_url, last_checked_at=now_iso())
+                return f"无更新：{html.escape(variant.app_name)}（{html.escape(variant.release_version_name)}）"
+        else:
+            # ── 快速 RSS 预检：无更新时直接返回，避免触发完整抓取 ──────────────
+            rss_release_url = fetch_rss_latest_release_url(session, apk_url)
+            if rss_release_url:
+                db_row = get_apk_version(apk_url)
+                if db_row and db_row["last_variant_url"]:
+                    last_release_path = _release_path_from_variant_url(db_row["last_variant_url"])
+                    rss_path = rss_release_url.split("apkmirror.com")[-1]
+                    if rss_path == last_release_path:
+                        update_apk_version(apk_url, last_checked_at=now_iso())
+                        app_label = html.escape(apk_url.rstrip("/").split("/")[-1])
+                        stored_ver_str = db_row["last_version_name"] or "—"
+                        logger.info("RSS 预检：%s 无更新（%s）", apk_url, stored_ver_str)
+                        return f"无更新：{app_label}（{html.escape(stored_ver_str)}）"
+            # ── RSS 显示有新版本，或首次检查，或 RSS 不可用 → 走完整流程 ────────
+            variant = scrape_and_pick(session, apk_url)
 
-        variant = scrape_and_pick(session, apk_url)
-
-        if not is_new_version(apk_url, variant.variant_url, variant.version_code, "", variant.type):
-            update_apk_version(apk_url, last_checked_at=now_iso())
-            return f"无更新：{html.escape(variant.app_name)}（{html.escape(variant.release_version_name)}）"
+            if not is_new_version(apk_url, variant.variant_url, variant.version_code, "", variant.type):
+                update_apk_version(apk_url, last_checked_at=now_iso())
+                return f"无更新：{html.escape(variant.app_name)}（{html.escape(variant.release_version_name)}）"
 
         # 有新版本 — 发通知 + 下载按钮，不自动推送 APK
         uid = _uuid_mod.uuid4().hex[:8]
@@ -167,10 +266,11 @@ def _check_single_url(apk_url: str) -> str:
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("⏬ 下载 APK", callback_data=f"dl:{uid}"))
 
+        source_label = "APKPure" if is_apkpure else "APKMirror"
         msg_text = (
             f"🆕 <b>{html.escape(variant.app_name)}</b> 有新版本\n\n"
             f"版本：<code>{html.escape(variant.release_version_name)}</code>\n"
-            f"来源：<a href=\"{variant.release_url}\">APKMirror</a>"
+            f"来源：<a href=\"{variant.release_url}\">{source_label}</a>"
         )
 
         subscribers = get_subscribers(apk_url)
@@ -335,19 +435,21 @@ def handle_sub(message: Message):
             "用法：/sub &lt;链接或包名&gt;\n\n"
             "订阅应用更新，有新版本时自动通知。支持以下格式：\n"
             "APKMirror 链接：<code>https://www.apkmirror.com/apk/…</code>\n"
+            "APKPure 链接：  <code>https://apkpure.com/…</code>\n"
             "Play Store 链接：<code>https://play.google.com/store/apps/details?id=…</code>\n"
-            "包名：          <code>com.android.chrome</code>",
+            "包名：          <code>com.android.chrome</code>\n"
+            "关键词：        <code>豆包</code> / <code>wechat</code>（搜索后从列表选择）",
             parse_mode="HTML",
         )
         return
 
     input_str = parts[1].strip()
-    url = _resolve_to_apkmirror_url(message, input_str)
-    if url is None:
+    if _is_keyword(input_str):
+        threading.Thread(target=_do_keyword_search, args=(message, input_str, "sub"), daemon=True).start()
         return
 
-    if "apkpure" in url:
-        bot.reply_to(message, "⚠️ APKPure 链接暂不支持订阅，请使用 /dl 直接下载。")
+    url = _resolve_to_apkmirror_url(message, input_str)
+    if url is None:
         return
 
     added = add_subscription(message.chat.id, url)
@@ -376,12 +478,17 @@ def handle_dl(message: Message):
             "APKMirror 链接：<code>https://www.apkmirror.com/apk/…</code>\n"
             "APKPure 链接：  <code>https://apkpure.com/…</code>\n"
             "Play Store 链接：<code>https://play.google.com/store/apps/details?id=…</code>\n"
-            "包名：          <code>com.android.chrome</code>",
+            "包名：          <code>com.android.chrome</code>\n"
+            "关键词：        <code>豆包</code> / <code>wechat</code>（搜索后从列表选择）",
             parse_mode="HTML",
         )
         return
 
     input_str = parts[1].strip()
+    if _is_keyword(input_str):
+        threading.Thread(target=_do_keyword_search, args=(message, input_str, "dl"), daemon=True).start()
+        return
+
     url = _resolve_to_apkmirror_url(message, input_str)
     if url is None:
         return
@@ -541,6 +648,7 @@ def handle_help(message: Message):
         "APKPure 链接：  <code>https://apkpure.com/…</code>\n"
         "Play Store 链接：<code>https://play.google.com/store/apps/details?id=…</code>\n"
         "包名：          <code>com.android.chrome</code>\n"
+        "关键词：        <code>豆包</code> / <code>wechat</code>（搜索后从列表选择）\n"
         "\n"
         "<b>🔍 状态</b>\n"
         "/check — 立即检查所有订阅更新\n"
@@ -568,3 +676,71 @@ def handle_dl_callback(call: CallbackQuery):
         parse_mode="HTML",
     )
     threading.Thread(target=_download_once, args=(call.message.chat.id, apk_url, status_msg.message_id), daemon=True).start()
+
+
+@bot.callback_query_handler(func=lambda c: c.data in ("noop",) or c.data.startswith(("sp:", "sg:", "sc:")))
+def handle_search_callback(call: CallbackQuery):
+    data = call.data
+
+    if data == "noop":
+        bot.answer_callback_query(call.id)
+        return
+
+    if data.startswith("sc:"):
+        sid = data[3:]
+        _search_sessions.pop(sid, None)
+        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_text("❌ 已取消搜索。", call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        return
+
+    if data.startswith("sg:"):
+        _, sid, page_str = data.split(":", 2)
+        sess = _search_sessions.get(sid)
+        if not sess:
+            bot.answer_callback_query(call.id, "⚠️ 会话已过期。")
+            return
+        bot.answer_callback_query(call.id)
+        markup = _build_search_keyboard(sid, sess["results"], int(page_str))
+        try:
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
+        except Exception:
+            pass
+        return
+
+    if data.startswith("sp:"):
+        _, sid, idx_str = data.split(":", 2)
+        sess = _search_sessions.pop(sid, None)
+        if not sess:
+            bot.answer_callback_query(call.id, "⚠️ 会话已过期。")
+            return
+        icon, name, apk_url = sess["results"][int(idx_str)]
+        mode = sess["mode"]
+        chat_id = sess["chat_id"]
+        bot.answer_callback_query(call.id)
+        label = "✅ 已选择" if mode == "sub" else "⏬ 准备下载"
+        try:
+            bot.edit_message_text(
+                f"{label}：{icon} <b>{html.escape(name)}</b>",
+                call.message.chat.id, call.message.message_id, parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+        if mode == "sub":
+            added = add_subscription(chat_id, apk_url)
+            dl_uid = _uuid_mod.uuid4().hex[:8]
+            _dl_callbacks[dl_uid] = apk_url
+            markup2 = InlineKeyboardMarkup()
+            markup2.add(InlineKeyboardButton("⏬ 下载 APK", callback_data=f"dl:{dl_uid}"))
+            reply_text = "⚠️ 已订阅该应用。" if not added else f"✅ 订阅成功！\n<code>{html.escape(apk_url)}</code>"
+            _safe_send(chat_id, reply_text, reply_markup=markup2)
+        else:
+            status_msg = bot.send_message(
+                chat_id, f"⏬ 正在下载，请稍等……\n<code>{html.escape(apk_url)}</code>", parse_mode="HTML",
+            )
+            threading.Thread(
+                target=_download_once, args=(chat_id, apk_url, status_msg.message_id), daemon=True
+            ).start()
