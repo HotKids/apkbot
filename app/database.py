@@ -24,6 +24,11 @@ def db_conn():
         conn.close()
 
 
+def _normalize_apk_url(url: str) -> str:
+    """规范化 APKMirror URL：去除 query string，确保尾部有斜杠。"""
+    return url.split("?")[0].rstrip("/") + "/"
+
+
 def init_db() -> None:
     with db_lock, db_conn() as conn:
         conn.executescript(
@@ -58,6 +63,16 @@ def init_db() -> None:
             conn.execute("ALTER TABLE apk_versions ADD COLUMN last_type TEXT")
         except sqlite3.OperationalError:
             pass
+        # 迁移：规范化历史订阅 URL（补充尾部斜杠），然后删除重复行
+        conn.execute(
+            "UPDATE subscriptions SET apk_url = rtrim(apk_url, '/') || '/' "
+            "WHERE apk_url NOT LIKE '%/'"
+        )
+        conn.execute(
+            "DELETE FROM subscriptions WHERE id NOT IN ("
+            "  SELECT MIN(id) FROM subscriptions GROUP BY chat_id, apk_url"
+            ")"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +121,7 @@ def is_in_whitelist(user_id: int) -> bool:
 
 def add_subscription(chat_id: int, apk_url: str) -> bool:
     """添加订阅，返回 True 表示新增，False 表示已存在。"""
+    apk_url = _normalize_apk_url(apk_url)
     with db_lock, db_conn() as conn:
         try:
             conn.execute(
@@ -119,6 +135,7 @@ def add_subscription(chat_id: int, apk_url: str) -> bool:
 
 def remove_subscription(chat_id: int, apk_url: str) -> bool:
     """取消指定订阅，返回 True 表示成功，False 表示不存在。"""
+    apk_url = _normalize_apk_url(apk_url)
     with db_lock, db_conn() as conn:
         cur = conn.execute(
             "DELETE FROM subscriptions WHERE chat_id = ? AND apk_url = ?",
