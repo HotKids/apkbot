@@ -852,7 +852,7 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
             return None
 
     # ── APPS tab ────────────────────────────────────────────────────────────
-    apps_url = f"{BASE_URL}/?post_type=app_release&searchtype=app&s={requests.utils.quote(keyword)}"
+    apps_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}"
     r = _fetch(apps_url)
     if r is not None and "No results found matching your query" not in r.text:
         m = _APKMIRROR_APP_RE.match(r.url)
