@@ -803,51 +803,45 @@ _apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
 
 
 def _parse_fontblack_apps(soup: BeautifulSoup, max_results: int) -> list[tuple[str, str]]:
-    """APPS tab：只收 2 段 app URL，3 段版本 URL（侧边栏热门）直接跳过。"""
+    """APPS tab：提取 2 段 app URL，彻底无视 CSS 类名，全量扫描 a 标签。"""
     from urllib.parse import urlparse
     results: list[tuple[str, str]] = []
     seen: set[str] = set()
-    # 扩展选择器：新结构用 .appRowTitle a，保留 a.fontBlack 做兜底，最后降级到全页扫描
-    candidates = (
-        soup.select(".appRowTitle a, a.fontBlack, .listWidget .appRow a")
-        or soup.select("a[href]")
-    )
-    for a in candidates:
-        href = a.get("href", "")
-        if not href:
-            continue
-        # 兼容绝对路径（偶尔出现 https://www.apkmirror.com/apk/...）
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
         path = urlparse(href).path if href.startswith("http") else href
         if not _apk_2seg_re.match(path):
             continue
         url = BASE_URL + path.rstrip("/") + "/"
         name = a.get_text(strip=True)
-        if url not in seen and name:
-            seen.add(url)
-            results.append((name, url))
-            if len(results) >= max_results:
-                break
+        if name and len(name) > 1 and "download" not in name.lower() and "apkmirror" not in name.lower():
+            if url not in seen:
+                seen.add(url)
+                results.append((name, url))
+                if len(results) >= max_results:
+                    break
     return results
 
 
 def _parse_fontblack_apks(soup: BeautifulSoup, max_results: int) -> list[tuple[str, str]]:
-    """APKS tab：将 3 段版本 URL 截断为 2 段 app URL，用出现次数≥2 过滤侧边栏。
-    真实搜索结果（同一 app 多个版本）同一 2 段 URL 重复出现；
-    侧边栏热门每个 app 只出现 1 次，count=1 → 跳过。
-    """
+    """APKS tab 兜底：提取 3 段版本 URL 截断为 2 段 app URL，同样无视 CSS 类名。"""
+    from urllib.parse import urlparse
     url_order: list[str] = []
     url_counts: dict[str, int] = {}
     url_names: dict[str, str] = {}
-    for a in soup.select("a.fontBlack"):
-        href = a.get("href", "")
-        m = _apk_ver_re.match(href)
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        path = urlparse(href).path if href.startswith("http") else href
+        m = _apk_ver_re.match(path)
         if not m:
             continue
         two_seg = m.group(1)
         url_counts[two_seg] = url_counts.get(two_seg, 0) + 1
         if two_seg not in url_names:
-            url_names[two_seg] = a.get_text(strip=True)
-            url_order.append(two_seg)
+            name = a.get_text(strip=True)
+            if name and len(name) > 1:
+                url_names[two_seg] = name
+                url_order.append(two_seg)
     results: list[tuple[str, str]] = []
     for two_seg in url_order:
         if url_counts[two_seg] >= 2:
@@ -871,7 +865,7 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
             return None
 
     # ── APPS tab ────────────────────────────────────────────────────────────
-    apps_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}"
+    apps_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}&sortby=date"
     r = _fetch(apps_url)
     if r is not None and "No results found matching your query" not in r.text:
         m = _APKMIRROR_APP_RE.match(r.url)
@@ -885,7 +879,7 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
             return results
 
     # ── APKS tab fallback（APPS tab 无结果时）───────────────────────────────
-    apks_url = f"{BASE_URL}/?searchtype=apk&s={requests.utils.quote(keyword)}"
+    apks_url = f"{BASE_URL}/?searchtype=apk&s={requests.utils.quote(keyword)}&sortby=date"
     r2 = _fetch(apks_url)
     if r2 is None or "No results found matching your query" in r2.text:
         return []
