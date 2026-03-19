@@ -4,13 +4,11 @@ import os
 import re
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
 
 import requests
-from pypinyin import lazy_pinyin
 try:
     from curl_cffi import requests as _cffi_requests
     _CURL_CFFI_AVAILABLE = True
@@ -313,8 +311,6 @@ def fetch_app_name_from_rss(session: requests.Session, apk_url: str) -> str:
     try:
         r = session.get(rss_url, timeout=10,
                         headers={"Accept": "application/rss+xml, text/xml, */*"})
-        if "xml" not in r.headers.get("Content-Type", "").lower():
-            raise ValueError(f"RSS 响应非 XML (Content-Type: {r.headers.get('Content-Type')}，可能被 Cloudflare 拦截)")
         root = ET.fromstring(r.content)
         channel = root.find("channel")
         if channel is None:
@@ -340,8 +336,6 @@ def fetch_rss_latest_release_url(session: requests.Session, apk_url: str) -> Opt
     try:
         r = session.get(rss_url, timeout=10,
                         headers={"Accept": "application/rss+xml, text/xml, */*"})
-        if "xml" not in r.headers.get("Content-Type", "").lower():
-            raise ValueError(f"RSS 响应非 XML (Content-Type: {r.headers.get('Content-Type')}，可能被 Cloudflare 拦截)")
         root = ET.fromstring(r.content)
         channel = root.find("channel")
         item = channel.find("item") if channel is not None else None
@@ -602,11 +596,6 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str, ref
     global _KNOWN_SUCCESSFUL_ACTION
     _key_m = re.search(r"[?&]key=([a-f0-9]+)", download_page_url)
     _post_id = _extract_post_id(soup, html)
-    if not (_key_m and _post_id):
-        logger.warning(
-            "AJAX 兜底跳过：缺少必要参数 (key=%s, post_id=%s, url=%s)",
-            bool(_key_m), bool(_post_id), download_page_url,
-        )
     if _key_m and _post_id:
         _dl_key = _key_m.group(1)
         _forcebase = "true" if "forcebaseapk" in download_page_url else "false"
@@ -760,253 +749,7 @@ def resolve_and_download(session: requests.Session, variant: Variant) -> tuple[P
 
 
 # ---------------------------------------------------------------------------
-# 关键词多结果搜索
-# ---------------------------------------------------------------------------
-
-_APKMIRROR_APP_RE = re.compile(r"^https?://(?:www\.)?apkmirror\.com(/apk/[^/]+/[^/]+)/?$")
-
-
-def _pkg_to_apkmirror(session: requests.Session, package_name: str) -> tuple[str, str] | None:
-    """将包名解析为 (app_name, apkmirror_url)；找不到返回 None。"""
-    search_url = f"{BASE_URL}/?searchtype=app&s={package_name}"
-    try:
-        r = session_get(session, search_url)
-    except Exception:
-        return None
-    soup = BeautifulSoup(r.text, "lxml")
-    # 直接重定向到 app 页面
-    m = _APKMIRROR_APP_RE.match(r.url)
-    if m:
-        app_url = BASE_URL + m.group(1) + "/"
-        h1 = soup.select_one("h1.app-title, h1")
-        name = h1.get_text(strip=True) if h1 else package_name
-        return (name, app_url)
-    # 搜索结果页
-    for a in soup.select("a.fontBlack"):
-        href = a.get("href", "")
-        if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
-            name = a.get_text(strip=True)
-            if name:
-                return (name, BASE_URL + href.rstrip("/") + "/")
-    # 降级：全页扫描
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
-            name = a.get_text(strip=True)
-            if name:
-                return (name, BASE_URL + href.rstrip("/") + "/")
-    return None
-
-
-_apk_2seg_re = re.compile(r"^/apk/[^/]+/[^/]+/?$")
-_apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
-
-
-def _parse_fontblack_apps(soup: BeautifulSoup, max_results: int) -> list[tuple[str, str]]:
-    """APPS tab：提取 2 段 app URL，彻底无视 CSS 类名，全量扫描 a 标签。"""
-    from urllib.parse import urlparse
-    results: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for a in soup.find_all("a", href=True):
-        path = urlparse(a["href"]).path
-        if not path.startswith("/"):
-            path = "/" + path
-        if not _apk_2seg_re.match(path):
-            continue
-        url = BASE_URL + path.rstrip("/") + "/"
-        name = a.get_text(strip=True)
-        if not name or len(name) < 2:
-            continue
-        name_lower = name.lower()
-        if name_lower in ("download", "download apk", "here") or "apkmirror" in name_lower:
-            continue
-        if url not in seen:
-            seen.add(url)
-            results.append((name, url))
-            if len(results) >= max_results:
-                break
-    return results
-
-
-def _parse_fontblack_apks(soup: BeautifulSoup, max_results: int) -> list[tuple[str, str]]:
-    """APKS tab 兜底：提取 3 段版本 URL 截断为 2 段 app URL，同样无视 CSS 类名。"""
-    from urllib.parse import urlparse
-    url_order: list[str] = []
-    url_counts: dict[str, int] = {}
-    url_names: dict[str, str] = {}
-    for a in soup.find_all("a", href=True):
-        path = urlparse(a["href"]).path
-        if not path.startswith("/"):
-            path = "/" + path
-        m = _apk_ver_re.match(path)
-        if not m:
-            continue
-        two_seg = m.group(1)
-        url_counts[two_seg] = url_counts.get(two_seg, 0) + 1
-        if two_seg not in url_names:
-            name = a.get_text(strip=True)
-            if not name or len(name) < 2:
-                continue
-            name_lower = name.lower()
-            if name_lower in ("download", "download apk", "here") or "apkmirror" in name_lower:
-                continue
-            url_names[two_seg] = name
-            url_order.append(two_seg)
-    results: list[tuple[str, str]] = []
-    for two_seg in url_order:
-        if url_counts[two_seg] >= 2:
-            name = url_names.get(two_seg, "")
-            if name:
-                results.append((name, BASE_URL + two_seg + "/"))
-                if len(results) >= max_results:
-                    break
-    return results
-
-
-def _search_apkmirror_direct(session: requests.Session, keyword: str, max_results: int) -> list[tuple[str, str]]:
-    """直接在 APKMirror 关键词搜索，返回 [(name, url), ...]。
-    先走 APPS tab（2 段 URL，sidebar 为 3 段可过滤）；
-    APPS tab 无结果时 fallback 到 APKS tab（count≥2 过滤 sidebar）。
-    """
-    def _fetch(url: str):
-        try:
-            r = session_get(session, url)
-            if r is not None and ("Cloudflare" in r.text or "Just a moment" in r.text):
-                logger.warning("🚨 触发 Cloudflare 拦截: %s", url)
-            return r
-        except Exception as e:
-            logger.warning("🚨 请求失败或被拦截 %s: %s", url, e)
-            return None
-
-    # ── APPS tab ────────────────────────────────────────────────────────────
-    apps_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}&sortby=date"
-    r = _fetch(apps_url)
-    if r is not None and "No results found matching your query" not in r.text:
-        m = _APKMIRROR_APP_RE.match(r.url)
-        if m:
-            soup = BeautifulSoup(r.text, "lxml")
-            h1 = soup.select_one("h1.app-title, h1")
-            name = h1.get_text(strip=True) if h1 else keyword
-            return [(name, BASE_URL + m.group(1) + "/")]
-        results = _parse_fontblack_apps(BeautifulSoup(r.text, "lxml"), max_results)
-        if results:
-            return results
-
-    # ── APKS tab fallback（APPS tab 无结果时）───────────────────────────────
-    apks_url = f"{BASE_URL}/?searchtype=apk&s={requests.utils.quote(keyword)}&sortby=date"
-    r2 = _fetch(apks_url)
-    if r2 is not None and "No results found matching your query" not in r2.text:
-        m2 = _APKMIRROR_APP_RE.match(r2.url)
-        if m2:
-            soup2 = BeautifulSoup(r2.text, "lxml")
-            h1 = soup2.select_one("h1.app-title, h1")
-            name = h1.get_text(strip=True) if h1 else keyword
-            return [(name, BASE_URL + m2.group(1) + "/")]
-        results2 = _parse_fontblack_apks(BeautifulSoup(r2.text, "lxml"), max_results)
-        if results2:
-            return results2
-
-    # ── 普通搜索页 fallback（searchtype 端点被 WAF 拦截时）──────────────────
-    # 真实浏览器走 /?s=keyword，WAF 规则更宽松，可绕过 searchtype 端点的 403
-    plain_url = f"{BASE_URL}/?s={requests.utils.quote(keyword)}"
-    logger.info("searchtype 端点被拦截，尝试普通搜索页: %s", plain_url)
-    r3 = _fetch(plain_url)
-    if r3 is None or "No results found matching your query" in r3.text:
-        return []
-    m3 = _APKMIRROR_APP_RE.match(r3.url)
-    if m3:
-        soup3 = BeautifulSoup(r3.text, "lxml")
-        h1 = soup3.select_one("h1.app-title, h1")
-        name = h1.get_text(strip=True) if h1 else keyword
-        return [(name, BASE_URL + m3.group(1) + "/")]
-    soup3 = BeautifulSoup(r3.text, "lxml")
-    results3 = _parse_fontblack_apps(soup3, max_results) or _parse_fontblack_apks(soup3, max_results)
-    return results3
-
-
-# APKPure 应用页 URL 格式：/slug/com.package.name（第二段为合法包名）
-_APKPURE_APP_URL_RE = re.compile(
-    r"^/[^/?#]+/([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+)$"
-)
-
-
-def search_apkpure(session: requests.Session, keyword: str, max_results: int = 5) -> list[tuple[str, str]]:
-    """关键词搜索 APKPure，返回 [(app_name, url), …]，最多 max_results 条。
-    不依赖易变的 CSS 类名，改为按 URL 结构（/slug/package.name）识别应用链接。
-    """
-    search_url = f"{_APKPURE_BASE}/search?q={requests.utils.quote(keyword)}"
-    try:
-        r = session_get(session, search_url, headers={"Referer": _APKPURE_BASE + "/"})
-    except Exception:
-        return []
-    soup = BeautifulSoup(r.text, "lxml")
-    results: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        if not _APKPURE_APP_URL_RE.match(href):
-            continue
-        full_url = _APKPURE_BASE + href.rstrip("/")
-        # 优先取链接内的标题元素，避免把 developer/version 也拼进名字
-        title_el = a.select_one("p.title-name, .title, h3, h2, span.title, p")
-        if title_el:
-            name = title_el.get_text(strip=True)
-        else:
-            # 回退：取第一行非空文本
-            lines = [l.strip() for l in a.get_text().splitlines() if l.strip()]
-            name = lines[0] if lines else ""
-        if not name:
-            continue
-        if full_url not in seen:
-            seen.add(full_url)
-            results.append((name, full_url))
-            if len(results) >= max_results:
-                break
-    return results
-
-
-_HAS_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
-
-
-def _to_pinyin(text: str) -> str:
-    """将汉字转为拼音连写（无声调），非汉字字符保留原样。"""
-    return "".join(lazy_pinyin(text))
-
-
-def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 20) -> list[tuple[str, str]]:
-    """主路径：APKMirror 直搜；含汉字时同时搜拼音；两者均无结果时 fallback APKPure。"""
-    if _HAS_CJK_RE.search(keyword):
-        pinyin_kw = _to_pinyin(keyword)
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            f_zh = ex.submit(_search_apkmirror_direct, session, keyword, max_results)
-            f_py = ex.submit(_search_apkmirror_direct, new_session(), pinyin_kw, max_results)
-        zh_res = f_zh.result() or []
-        py_res = f_py.result() or []
-        seen: set[str] = set()
-        results: list[tuple[str, str]] = []
-        for name, url in zh_res + py_res:
-            if url not in seen:
-                seen.add(url)
-                results.append((name, url))
-                if len(results) >= max_results:
-                    break
-        if results:
-            return results
-    else:
-        results = _search_apkmirror_direct(session, keyword, max_results)
-        if results:
-            return results
-
-    # Fallback：取 APKPure 第一条结果名称再搜 APKMirror
-    ap_hits = search_apkpure(new_session(), keyword, 1)
-    if not ap_hits:
-        return []
-    first_name, _ = ap_hits[0]
-    return _search_apkmirror_direct(session, first_name, max_results)
-
-
-# ---------------------------------------------------------------------------
-# 包名 → APKMirror / APKPure URL 解析
+# 包名 → APKMirror URL 解析
 # ---------------------------------------------------------------------------
 
 def resolve_package_to_apkmirror_url(session: requests.Session, package_name: str) -> Optional[str]:
@@ -1224,3 +967,39 @@ def resolve_and_download_apkpure(session: requests.Session, variant: Variant) ->
         variant.release_version_name = ver_m.group(1)
 
     return apk_path, file_hash
+
+
+_APKPURE_APP_URL_RE = re.compile(
+    r"^/[^/?#]+/([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+)$"
+)
+
+
+def search_apkpure(session: requests.Session, keyword: str, max_results: int = 50) -> list[tuple[str, str]]:
+    """关键词搜索 APKPure，返回 [(app_name, url), …]，最多 max_results 条。"""
+    search_url = f"{_APKPURE_BASE}/search?q={requests.utils.quote(keyword)}"
+    try:
+        r = session_get(session, search_url, headers={"Referer": _APKPURE_BASE + "/"})
+    except Exception:
+        return []
+    soup = BeautifulSoup(r.text, "lxml")
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        if not _APKPURE_APP_URL_RE.match(href):
+            continue
+        full_url = _APKPURE_BASE + href.rstrip("/")
+        title_el = a.select_one("p.title-name, .title, h3, h2, span.title, p")
+        if title_el:
+            name = title_el.get_text(strip=True)
+        else:
+            lines = [l.strip() for l in a.get_text().splitlines() if l.strip()]
+            name = lines[0] if lines else ""
+        if not name:
+            continue
+        if full_url not in seen:
+            seen.add(full_url)
+            results.append((name, full_url))
+            if len(results) >= max_results:
+                break
+    return results
