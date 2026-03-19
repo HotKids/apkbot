@@ -959,4 +959,11 @@ def resolve_and_download_apkpure(session: requests.Session, variant: Variant) ->
     apk_path = download_file(session, final_url, fallback_name, referer=variant.variant_url)
     file_hash = sha256_file(apk_path)
     logger.info("APKPure 下载完成：%s (sha256=%s...)", apk_path.name, file_hash[:12])
+
+    # 从实际文件名提取版本号（页面抓取可能受评分等数字干扰）
+    clean_stem = re.sub(r'_[0-9a-f]{8}$', '', apk_path.stem)
+    ver_m = re.search(r'(\d+\.\d+(?:\.\d+)*)', clean_stem)
+    if ver_m:
+        variant.release_version_name = ver_m.group(1)
+
     return apk_path, file_hash

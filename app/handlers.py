@@ -94,33 +94,40 @@ def _require_owner(message: Message) -> bool:
 
 def _caption_text(variant: Variant, apk_path: Path, sha256: str) -> str:
     size_mb = apk_path.stat().st_size / 1024 / 1024
-    sigs = ", ".join(variant.signatures) or "—"
     arch_list = variant.architectures
     archs = "universal" if "universal" in arch_list else (", ".join(arch_list) or "—")
     today = datetime.now(ZoneInfo(TZ)).strftime("%Y-%m-%d")
+    is_apkpure = "apkpure" in variant.release_url
+    sig_line = "" if is_apkpure else f"签名：<code>{html.escape(', '.join(variant.signatures) or '—')}</code>\n"
     return (
         f"版本：<code>{html.escape(variant.release_version_name)}</code>\n"
         f"日期：<code>{today}</code>\n"
         f"类型：<code>{variant.type}</code>\n"
-        f"签名：<code>{html.escape(sigs)}</code>\n"
+        + sig_line +
         f"架构：<code>{html.escape(archs)}</code>\n"
         f"最低系统：<code>{html.escape(variant.min_android_text or '—')}</code>\n"
         f"DPI：<code>{variant.dpi or '—'}</code>\n"
         f"大小：<code>{size_mb:.2f} MB</code>\n"
         f"SHA256：<code>{sha256}</code>\n"
-        f"来源：<a href=\"{variant.release_url}\">{'APKPure' if 'apkpure' in variant.release_url else 'APKMirror'}</a>"
+        f"来源：<a href=\"{variant.release_url}\">{'APKPure' if is_apkpure else 'APKMirror'}</a>"
     )
 
 
 def _send_apk_to_user(chat_id: int, variant: Variant, apk_path: Path, sha256: str) -> None:
     """向单个用户发送 APK 文件。"""
     caption = _caption_text(variant, apk_path, sha256)
+    if "apkpure" in variant.release_url:
+        # 保留 CDN 原始文件名，仅去掉磁盘去重 UUID 后缀（_xxxxxxxx）
+        clean_stem = re.sub(r'_[0-9a-f]{8}$', '', apk_path.stem)
+        file_name = clean_stem + apk_path.suffix
+    else:
+        file_name = (re.sub(r'\s+', "_", re.sub(r'[\\/*?:"<>|]', "_",
+            variant.app_name)) + (".apkm" if variant.is_bundle else ".apk"))
     with apk_path.open("rb") as f:
         bot.send_document(
             chat_id,
             f,
-            visible_file_name=re.sub(r'\s+', "_", re.sub(r'[\\/*?:"<>|]', "_",
-                variant.app_name)) + (".apkm" if variant.is_bundle else ".apk"),
+            visible_file_name=file_name,
             caption=caption,
             timeout=300,
         )
