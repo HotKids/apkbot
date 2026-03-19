@@ -454,16 +454,17 @@ def _extract_ajaxurl(html: str) -> str:
     return m.group(1) if m else "/wp-admin/admin-ajax.php"
 
 
-# 运行时缓存：JS 文件 URL → 找到的 AJAX action 名，避免重复拉取
-_download_action_cache: dict[str, str] = {}
+# 运行时缓存：JS 文件 URL → 找到的 AJAX action 列表，避免重复拉取
+_download_action_cache: dict[str, list[str]] = {}
 
 
-def _fetch_apkm_download_action(
+def _fetch_apkm_download_actions(
     session: requests.Session, page_html: str, referer: str
-) -> Optional[str]:
-    """从确认页加载的外部 APKMirror JS 文件中找到下载 AJAX action 名。
+) -> list[str]:
+    """从确认页加载的外部 APKMirror JS 文件中找到所有可能的 AJAX action 名。
     扫描所有 <script src> 中属于 apkmirror.com 的脚本，跳过 CDN 公共库。
-    结果缓存到进程内字典，热路径无需重复请求。"""
+    为了对抗反爬虫改名，不再限定必须包含 download 等关键字，而是提取所有 action。"""
+    actions = []
     soup_js = BeautifulSoup(page_html, "lxml")
     for tag in soup_js.select("script[src]"):
         src = tag.get("src", "")
@@ -476,28 +477,25 @@ def _fetch_apkm_download_action(
         full_src = urljoin(BASE_URL, src)
         # 已缓存直接返回
         if full_src in _download_action_cache:
-            logger.debug("JS action cache hit: %s → %s", full_src, _download_action_cache[full_src])
-            return _download_action_cache[full_src]
+            logger.debug("JS action cache hit: %s", full_src)
+            actions.extend(_download_action_cache[full_src])
+            continue
         try:
             r = session.get(full_src, timeout=10, headers={"Referer": referer})
             js = r.text
-            # 搜索形如 action:"generate_download_key_ajax" 或 action='apkm_download' 的片段
-            # 要求 action 值含有 download / generate / key 关键字之一
-            m = re.search(
-                r'action\s*[=:]\s*["\']([a-zA-Z_][a-zA-Z0-9_]*(?:download|generate|key)[a-zA-Z0-9_]*)["\']',
-                js,
-                re.IGNORECASE,
-            )
-            if m:
-                action = m.group(1)
-                _download_action_cache[full_src] = action
-                logger.info("从 JS 文件找到 download action: %s  (src=%s)", action, full_src)
-                return action
-            logger.info("JS 文件无 download action（HTTP %d，%d bytes）: %s",
-                        r.status_code, len(js), full_src)
+            # 放宽正则：匹配所有 action:"xxxx" 或 action:'yyyy'，不限定关键字
+            found = re.findall(r'action\s*[=:]\s*["\']([a-zA-Z0-9_]+)["\']', js)
+            if found:
+                _download_action_cache[full_src] = found
+                logger.info("从 JS 文件找到 %d 个候选 action: %s (src=%s)", len(found), found, full_src)
+                actions.extend(found)
+            else:
+                _download_action_cache[full_src] = []
+                logger.info("JS 文件无 action 字段（HTTP %d，%d bytes）: %s",
+                            r.status_code, len(js), full_src)
         except Exception as e:
             logger.info("获取 JS 文件失败 %s: %s", full_src, e)
-    return None
+    return list(dict.fromkeys(actions))
 
 
 def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> str:
@@ -561,15 +559,17 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str) -> 
         _ajax_base = _extract_ajaxurl(html)   # 页面里的 /wordpress/wp-admin/admin-ajax.php
         _ajax_full = urljoin(BASE_URL, _ajax_base)
         _nonce = _extract_wp_nonce(html)      # 可能是 None，无 nonce 也尝试
-        # 先从外部 JS 文件找 action；找不到再 fallback 到猜测列表
-        _js_action = _fetch_apkm_download_action(session, html, download_page_url)
-        _actions = ([_js_action] if _js_action else []) + [
+        # 先从外部 JS 文件提取所有可能的 action；再 fallback 到旧版已知列表
+        _js_actions = _fetch_apkm_download_actions(session, html, download_page_url)
+        _actions = _js_actions + [
             "apkm_generate_download_key_ajax",
             "generate_download_key_ajax",
             "get_download_key",
             "apkm_download_v2",
             "apkm_download",
         ]
+        # 去重并保持尝试顺序
+        _actions = list(dict.fromkeys(_actions))
         logger.info(
             "Step6 ajaxurl=%s post_id=%s key=%s nonce=%s actions=%s",
             _ajax_full, _post_id, _dl_key, _nonce, _actions,
