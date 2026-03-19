@@ -2,6 +2,7 @@ import html
 import logging
 import re
 import threading
+import time
 import uuid as _uuid_mod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -278,8 +279,8 @@ def _resolve_to_apkmirror_url(message: Message, input_str: str) -> Optional[str]
 # 一次性下载（不写数据库）
 # ---------------------------------------------------------------------------
 
-def _download_once(chat_id: int, apk_url: str) -> None:
-    """一次性下载并发送，不写数据库。"""
+def _download_once(chat_id: int, apk_url: str, status_msg_id: Optional[int] = None) -> None:
+    """一次性下载并发送，不写数据库。status_msg_id 为下载状态消息 ID，成功后编辑并 60s 自动删除。"""
     apk_path: Optional[Path] = None
     try:
         session = new_session()
@@ -290,9 +291,23 @@ def _download_once(chat_id: int, apk_url: str) -> None:
             variant = scrape_and_pick(session, apk_url)
             apk_path, sha256 = resolve_and_download(session, variant)
         _send_apk_to_user(chat_id, variant, apk_path, sha256)
+        if status_msg_id:
+            try:
+                bot.edit_message_text("✅ 下载完成", chat_id, status_msg_id)
+                time.sleep(60)
+                bot.delete_message(chat_id, status_msg_id)
+            except Exception:
+                pass
     except Exception as e:
         logger.exception("一次性下载失败：chat_id=%s url=%s", chat_id, apk_url)
-        _safe_send(chat_id, f"❌ 下载失败：{html.escape(str(e))}")
+        err_text = f"❌ 下载失败：{html.escape(str(e))}"
+        if status_msg_id:
+            try:
+                bot.edit_message_text(err_text, chat_id, status_msg_id, parse_mode="HTML")
+            except Exception:
+                _safe_send(chat_id, err_text)
+        else:
+            _safe_send(chat_id, err_text)
     finally:
         if apk_path is not None:
             cleanup_after_push(apk_path)
@@ -364,8 +379,8 @@ def handle_dl(message: Message):
     if url is None:
         return
 
-    bot.reply_to(message, f"⏬ 正在下载，请稍等……\n<code>{html.escape(url)}</code>")
-    threading.Thread(target=_download_once, args=(message.chat.id, url), daemon=True).start()
+    status_msg = bot.reply_to(message, f"⏬ 正在下载，请稍等……\n<code>{html.escape(url)}</code>")
+    threading.Thread(target=_download_once, args=(message.chat.id, url, status_msg.message_id), daemon=True).start()
 
 
 @bot.message_handler(commands=["unsub"])
@@ -529,9 +544,9 @@ def handle_dl_callback(call: CallbackQuery):
         bot.answer_callback_query(call.id, "链接已过期，请等待下次更新通知。")
         return
     bot.answer_callback_query(call.id, "⏬ 开始下载……")
-    bot.send_message(
+    status_msg = bot.send_message(
         call.message.chat.id,
         f"⏬ 正在下载，请稍等……\n<code>{html.escape(apk_url)}</code>",
         parse_mode="HTML",
     )
-    threading.Thread(target=_download_once, args=(call.message.chat.id, apk_url), daemon=True).start()
+    threading.Thread(target=_download_once, args=(call.message.chat.id, apk_url, status_msg.message_id), daemon=True).start()
