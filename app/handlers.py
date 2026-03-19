@@ -300,7 +300,7 @@ def handle_sub(message: Message):
 
     added = add_subscription(message.chat.id, url)
     if not added:
-        bot.reply_to(message, "🔄 已订阅该应用。正在为您手动抓取当前最新版本，请稍等……")
+        bot.reply_to(message, "⏬ 已订阅该应用。正在为您手动抓取当前最新版本，请稍等……")
         threading.Thread(target=_send_current_version, args=(message.chat.id, url), daemon=True).start()
         return
     bot.reply_to(message, f"✅ 订阅成功！正在获取当前最新版本，请稍等……\n<code>{html.escape(url)}</code>")
@@ -334,7 +334,7 @@ def handle_dl(message: Message):
     if url is None:
         return
 
-    bot.reply_to(message, f"🔄 正在下载，请稍等……\n<code>{html.escape(url)}</code>")
+    bot.reply_to(message, f"⏬ 正在下载，请稍等……\n<code>{html.escape(url)}</code>")
     threading.Thread(target=_download_once, args=(message.chat.id, url), daemon=True).start()
 
 
