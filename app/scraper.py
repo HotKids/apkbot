@@ -878,9 +878,18 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
             logger.warning("🚨 请求失败或被拦截 %s: %s", url, e)
             return None
 
+    def _fetch_with_fallback(url_with_sort: str):
+        """带 &sortby=date 请求；若失败（WAF 针对低结果量查询返回 403），去掉该参数重试一次。"""
+        r = _fetch(url_with_sort)
+        if r is None:
+            url_nosort = url_with_sort.replace("&sortby=date", "")
+            logger.info("sortby=date 被拦截，去掉参数重试: %s", url_nosort)
+            r = _fetch(url_nosort)
+        return r
+
     # ── APPS tab ────────────────────────────────────────────────────────────
     apps_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}&sortby=date"
-    r = _fetch(apps_url)
+    r = _fetch_with_fallback(apps_url)
     if r is not None and "No results found matching your query" not in r.text:
         m = _APKMIRROR_APP_RE.match(r.url)
         if m:
@@ -894,7 +903,7 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
 
     # ── APKS tab fallback（APPS tab 无结果时）───────────────────────────────
     apks_url = f"{BASE_URL}/?searchtype=apk&s={requests.utils.quote(keyword)}&sortby=date"
-    r2 = _fetch(apks_url)
+    r2 = _fetch_with_fallback(apks_url)
     if r2 is None or "No results found matching your query" in r2.text:
         return []
     m2 = _APKMIRROR_APP_RE.match(r2.url)
