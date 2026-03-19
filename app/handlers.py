@@ -114,13 +114,22 @@ def _do_keyword_search(message: Message, keyword: str, mode: str) -> None:
             f_ap = ex.submit(search_apkpure, new_session(), keyword)
             am_list = [("🟠", n, u) for n, u in (f_am.result() or [])]
             ap_list = [("🟢", n, u) for n, u in (f_ap.result() or [])]
-        # 交替合并（相关性混排）
-        results: list = []
-        for i in range(max(len(am_list), len(ap_list))):
-            if i < len(am_list):
-                results.append(am_list[i])
-            if i < len(ap_list):
-                results.append(ap_list[i])
+        # 合并：APKMirror 在前（同分时优先），按名字与关键词相关性升序排列，取前 5
+        def _relevance(item: tuple) -> int:
+            name = item[1].lower()
+            kw = keyword.lower()
+            if name == kw:
+                return 0
+            if name.startswith(kw):
+                return 1
+            if kw in name:
+                return 2
+            if any(w in name for w in kw.split()):
+                return 3
+            return 4
+        combined = am_list + ap_list  # APKMirror 排前，保证同分优先
+        combined.sort(key=_relevance)  # 稳定排序，同分保持原序（APKMirror 先）
+        results = combined[:5]
         if not results:
             bot.edit_message_text(
                 f"❌ 未找到 <b>{html.escape(keyword)}</b> 相关应用。",
