@@ -39,6 +39,7 @@ from database import (
 from scraper import (
     _release_path_from_variant_url,
     cleanup_after_push,
+    fetch_app_name_from_rss,
     fetch_rss_latest_release_url,
     new_session,
     resolve_and_download,
@@ -414,12 +415,6 @@ def handle_unsub(message: Message):
             bot.reply_to(message, "❌ 未找到该订阅，请检查 URL 是否正确。")
 
 
-def _app_name_from_url(url: str) -> str:
-    """从 URL 末尾路径段提取可读 App 名，如 google-play-store → Google Play Store。"""
-    seg = url.rstrip("/").split("/")[-1]
-    return seg.replace("-", " ").title()
-
-
 @bot.message_handler(commands=["list"])
 def handle_sublist(message: Message):
     if not _require_allowed(message):
@@ -427,12 +422,19 @@ def handle_sublist(message: Message):
     subs = get_subscriptions(message.chat.id)
     if not subs:
         bot.reply_to(message, "当前无订阅。使用 /sub &lt;url&gt; 添加。")
-    else:
-        lines = "\n".join(
-            f"• <b>{html.escape(_app_name_from_url(s))}</b>  <code>{html.escape(s)}</code>"
-            for s in subs
-        )
-        bot.reply_to(message, f"当前订阅（{len(subs)} 个）：\n{lines}", parse_mode="HTML")
+        return
+    session = new_session()
+    lines = "\n".join(
+        f"• <b>{html.escape(fetch_app_name_from_rss(session, s))}</b>  "
+        f"<a href=\"{html.escape(s)}\">{html.escape(s)}</a>"
+        for s in subs
+    )
+    bot.reply_to(
+        message,
+        f"当前订阅（{len(subs)} 个）：\n{lines}",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
 
 @bot.message_handler(commands=["check"])

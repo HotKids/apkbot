@@ -302,6 +302,32 @@ def parse_variants(session: requests.Session, release_url: str) -> list[Variant]
 # 过滤 & 打分 & 选择（委托给 selector 模块）
 # ---------------------------------------------------------------------------
 
+def fetch_app_name_from_rss(session: requests.Session, apk_url: str) -> str:
+    """从 APKMirror RSS channel title 提取 App 名。
+    channel title 格式：'Download {AppName} APKs for Android – APKMirror'
+    失败时回退到 URL 路径段。"""
+    import xml.etree.ElementTree as ET
+    rss_url = apk_url.rstrip("/") + "/feed/"
+    try:
+        r = session.get(rss_url, timeout=10,
+                        headers={"Accept": "application/rss+xml, text/xml, */*"})
+        root = ET.fromstring(r.content)
+        channel = root.find("channel")
+        if channel is None:
+            raise ValueError("no channel")
+        title = (channel.findtext("title") or "").strip()
+        # "Download WeChat APKs for Android – APKMirror" → "WeChat"
+        title = re.sub(r"^Download\s+", "", title, flags=re.I)
+        title = re.sub(r"\s+APKs?\s+for\s+Android.*$", "", title, flags=re.I)
+        if title:
+            return title
+    except Exception as e:
+        logger.debug("RSS app name fetch 失败 %s: %s", apk_url, e)
+    # 回退：URL 末尾路径段转 Title Case
+    seg = apk_url.rstrip("/").split("/")[-1]
+    return seg.replace("-", " ").title()
+
+
 def fetch_rss_latest_release_url(session: requests.Session, apk_url: str) -> Optional[str]:
     """从 APKMirror RSS feed 获取最新一条 release 的页面 URL。
     失败时返回 None，调用方回退到完整 HTML 抓取流程。"""
