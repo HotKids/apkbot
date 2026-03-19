@@ -790,7 +790,7 @@ def _pkg_to_apkmirror(session: requests.Session, package_name: str) -> tuple[str
 
 def _search_apkmirror_direct(session: requests.Session, keyword: str, max_results: int) -> list[tuple[str, str]]:
     """直接在 APKMirror 关键词搜索，返回 [(name, url), ...]。"""
-    search_url = f"{BASE_URL}/?s={requests.utils.quote(keyword)}"
+    search_url = f"{BASE_URL}/?searchtype=app&sortby=date&s={requests.utils.quote(keyword)}"
     try:
         r = session_get(session, search_url)
     except Exception:
@@ -812,10 +812,12 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
         name = h1.get_text(strip=True) if h1 else keyword
         return [(name, app_url)]
 
-    # APPS tab（sortby=date）：a.fontBlack 通常直接指向 2 段 app URL
-    # 保留 3 段截断逻辑作为兜底；仅按 URL 去重，不做名称归一化
+    # 移除侧边栏（Bootstrap 窄列），避免抓取 "Popular In Last 30 Days" 等热门应用链接
+    for sidebar in soup.select("div.col-md-3, div.col-md-4, div.col-sm-4, aside"):
+        sidebar.decompose()
+
+    # APPS tab：a.fontBlack 直接指向 2 段 app URL；保留 3 段截断逻辑作为兜底
     _apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
-    seen: set[str] = set()
     for a in soup.select("a.fontBlack"):
         href = a.get("href", "")
         if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
