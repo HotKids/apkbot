@@ -461,21 +461,28 @@ _download_action_cache: dict[str, list[str]] = {}
 def _fetch_apkm_download_actions(
     session: requests.Session, page_html: str, referer: str
 ) -> list[str]:
-    """从确认页加载的外部 APKMirror JS 文件中找到所有可能的 AJAX action 名。
-    扫描所有 <script src> 中属于 apkmirror.com 的脚本，跳过 CDN 公共库。
-    为了对抗反爬虫改名，不再限定必须包含 download 等关键字，而是提取所有 action。"""
+    """从确认页 HTML 内联代码及外部 APKMirror JS 文件中找到所有可能的 AJAX action 名。"""
     actions = []
+    # 终极版正则：兼容 "action":"xxx", 'action':'xxx', action:"xxx" 各种情况（含压缩混淆）
+    pattern = r'(?:["\']?action["\']?)\s*[:=]\s*["\']([a-zA-Z0-9_-]+)["\']'
+
+    # 1. 先在当前页面的 HTML 内联脚本里找
+    found_inline = re.findall(pattern, page_html)
+    if found_inline:
+        logger.info("从 HTML 内联找到 %d 个候选 action: %s", len(found_inline), found_inline)
+        actions.extend(found_inline)
+
+    # 2. 遍历外部 JS 文件
     soup_js = BeautifulSoup(page_html, "lxml")
     for tag in soup_js.select("script[src]"):
         src = tag.get("src", "")
         if not src or "apkmirror.com" not in src:
             continue
-        # 跳过公共 CDN 库（jquery、lodash 等）
+        # 跳过已知无关的公共库和广告库
         src_lower = src.lower()
-        if any(lib in src_lower for lib in ("jquery", "lodash", "bootstrap", "recaptcha")):
+        if any(lib in src_lower for lib in ("jquery", "lodash", "bootstrap", "recaptcha", "cmp.inmobi")):
             continue
         full_src = urljoin(BASE_URL, src)
-        # 已缓存直接返回
         if full_src in _download_action_cache:
             logger.debug("JS action cache hit: %s", full_src)
             actions.extend(_download_action_cache[full_src])
@@ -483,11 +490,16 @@ def _fetch_apkm_download_actions(
         try:
             r = session.get(full_src, timeout=10, headers={"Referer": referer})
             js = r.text
-            # 放宽正则：匹配所有 action:"xxxx" 或 action:'yyyy'，不限定关键字
-            found = re.findall(r'action\s*[=:]\s*["\']([a-zA-Z0-9_]+)["\']', js)
+            found = re.findall(pattern, js)
+            # 兜底：正则未命中时，暴力提取 JS 中所有 10-40 位小写字母+下划线的字符串
+            if not found:
+                heuristics = re.findall(r'["\']([a-z_]{10,40})["\']', js)
+                if heuristics:
+                    logger.info("正则未命中，启用启发式兜底，提取 %d 个长字符串", len(heuristics))
+                    found = heuristics
             if found:
                 _download_action_cache[full_src] = found
-                logger.info("从 JS 文件找到 %d 个候选 action: %s (src=%s)", len(found), found, full_src)
+                logger.info("从 JS 文件找到 %d 个候选 action (src=%s)", len(found), full_src)
                 actions.extend(found)
             else:
                 _download_action_cache[full_src] = []
