@@ -790,7 +790,7 @@ def _pkg_to_apkmirror(session: requests.Session, package_name: str) -> tuple[str
 
 def _search_apkmirror_direct(session: requests.Session, keyword: str, max_results: int) -> list[tuple[str, str]]:
     """直接在 APKMirror 关键词搜索，返回 [(name, url), ...]。"""
-    search_url = f"{BASE_URL}/?searchtype=app&sortby=date&s={requests.utils.quote(keyword)}"
+    search_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}"
     try:
         r = session_get(session, search_url)
     except Exception:
