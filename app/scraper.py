@@ -797,9 +797,7 @@ def _parse_fontblack_apps(soup: BeautifulSoup, max_results: int) -> list[tuple[s
     """APPS tab：只收 2 段 app URL，3 段版本 URL（侧边栏热门）直接跳过。"""
     results: list[tuple[str, str]] = []
     seen: set[str] = set()
-    # 优先 fontBlack（精准），若页面结构已变则降级到全页 a[href] 扫描
-    candidates = soup.select("a.fontBlack") or soup.select("a[href]")
-    for a in candidates:
+    for a in soup.select("a.fontBlack"):
         href = a.get("href", "")
         if not _apk_2seg_re.match(href):
             continue
