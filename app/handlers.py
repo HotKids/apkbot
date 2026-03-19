@@ -38,7 +38,7 @@ from scraper import (
 )
 from selector import Variant
 
-logger = logging.getLogger("apkmirror-bot")
+logger = logging.getLogger("apkdl-bot")
 
 if LOCAL_BOT_API_URL:
     telebot.apihelper.API_URL = LOCAL_BOT_API_URL + "/bot{0}/{1}"

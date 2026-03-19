@@ -11,7 +11,7 @@ logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-logger = logging.getLogger("apkmirror-bot")
+logger = logging.getLogger("apkdl-bot")
 
 
 def scheduled_job() -> None:

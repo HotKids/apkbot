@@ -25,8 +25,8 @@
 ### 1. 拉取代码
 
 ```bash
-git clone https://github.com/HotKids/apkmirror_tg_bot.git
-cd apkmirror_tg_bot
+git clone https://github.com/HotKids/apkdl_tg_bot.git
+cd apkdl_tg_bot
 ```
 
 ### 2. 配置环境变量

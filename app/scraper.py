@@ -25,7 +25,7 @@ from config import (
 )
 from selector import Variant, config_from_env, select_best_variant
 
-logger = logging.getLogger("apkmirror-bot")
+logger = logging.getLogger("apkdl-bot")
 
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_BASE = 1  # 秒；延迟依次为 1s, 2s, 4s

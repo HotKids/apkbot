@@ -9,9 +9,9 @@ services:
     volumes:
       - ./data/bot-api:/var/lib/telegram-bot-api
 
-  apkmirror-bot:
+  apkdl-bot:
     build: .
-    container_name: apkmirror-bot
+    container_name: apkdl-bot
     restart: unless-stopped
     env_file:
       - .env
