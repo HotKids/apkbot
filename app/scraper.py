@@ -790,7 +790,7 @@ def _pkg_to_apkmirror(session: requests.Session, package_name: str) -> tuple[str
 
 def _search_apkmirror_direct(session: requests.Session, keyword: str, max_results: int) -> list[tuple[str, str]]:
     """直接在 APKMirror 关键词搜索，返回 [(name, url), ...]。"""
-    search_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}"
+    search_url = f"{BASE_URL}/?searchtype=apk&s={requests.utils.quote(keyword)}"
     try:
         r = session_get(session, search_url)
     except Exception:
@@ -807,36 +807,23 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
         name = h1.get_text(strip=True) if h1 else keyword
         return [(name, app_url)]
 
-    # 搜索结果页 a.fontBlack
+    # APKS tab：a.fontBlack 为版本页（3 段），截断为 app URL 后去重
+    _apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
     for a in soup.select("a.fontBlack"):
         href = a.get("href", "")
         if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
-            url = BASE_URL + href.rstrip("/") + "/"
-            name = a.get_text(strip=True)
-            if url not in seen and name:
-                seen.add(url)
-                results.append((name, url))
-                if len(results) >= max_results:
-                    break
-
-    # 降级：全页扫描，同时匹配 2 段 app URL 和 3 段 APK 版本 URL（截断为 app URL）
-    if not results:
-        _apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
-        for a in soup.select("a[href]"):
-            href = a.get("href", "")
-            if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
-                app_path = href.rstrip("/")
-            elif m2 := _apk_ver_re.match(href):
-                app_path = m2.group(1)
-            else:
-                continue
-            url = BASE_URL + app_path + "/"
-            name = a.get_text(strip=True)
-            if url not in seen and name:
-                seen.add(url)
-                results.append((name, url))
-                if len(results) >= max_results:
-                    break
+            app_path = href.rstrip("/")
+        elif m2 := _apk_ver_re.match(href):
+            app_path = m2.group(1)
+        else:
+            continue
+        url = BASE_URL + app_path + "/"
+        name = a.get_text(strip=True)
+        if url not in seen and name:
+            seen.add(url)
+            results.append((name, url))
+            if len(results) >= max_results:
+                break
     return results
 
 
