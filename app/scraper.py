@@ -10,6 +10,7 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import requests
+from pypinyin import lazy_pinyin
 try:
     from curl_cffi import requests as _cffi_requests
     _CURL_CFFI_AVAILABLE = True
@@ -790,7 +791,7 @@ def _pkg_to_apkmirror(session: requests.Session, package_name: str) -> tuple[str
 
 def _search_apkmirror_direct(session: requests.Session, keyword: str, max_results: int) -> list[tuple[str, str]]:
     """直接在 APKMirror 关键词搜索，返回 [(name, url), ...]。"""
-    search_url = f"{BASE_URL}/?searchtype=apk&sortby=date&s={requests.utils.quote(keyword)}"
+    search_url = f"{BASE_URL}/?searchtype=app&sortby=date&s={requests.utils.quote(keyword)}"
     try:
         r = session_get(session, search_url)
     except Exception:
@@ -798,6 +799,11 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
     soup = BeautifulSoup(r.text, "lxml")
     results: list[tuple[str, str]] = []
     seen: set[str] = set()
+
+    # 无匹配时页面有"No results found"提示，但侧边栏仍有热门应用链接（fontBlack）
+    # 任何关键词无结果时立即返回空，避免抓到侧边栏热门应用
+    if "No results found matching your query" in r.text:
+        return []
 
     # 直接重定向到 app 页（精确匹配）
     m = _APKMIRROR_APP_RE.match(r.url)
@@ -807,10 +813,12 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
         name = h1.get_text(strip=True) if h1 else keyword
         return [(name, app_url)]
 
-    # APPS tab（sortby=date）：a.fontBlack 通常直接指向 2 段 app URL
-    # 保留 3 段截断逻辑作为兜底；仅按 URL 去重，不做名称归一化
+    # 移除侧边栏（Bootstrap 窄列），避免抓取 "Popular In Last 30 Days" 等热门应用链接
+    for sidebar in soup.select("div.col-md-3, div.col-md-4, div.col-sm-4, aside"):
+        sidebar.decompose()
+
+    # APPS tab：a.fontBlack 直接指向 2 段 app URL；保留 3 段截断逻辑作为兜底
     _apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
-    seen: set[str] = set()
     for a in soup.select("a.fontBlack"):
         href = a.get("href", "")
         if re.match(r"^/apk/[^/]+/[^/]+/?$", href):
@@ -872,13 +880,39 @@ def search_apkpure(session: requests.Session, keyword: str, max_results: int = 5
     return results
 
 
-def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 20) -> list[tuple[str, str]]:
-    """主路径：APKMirror 直搜；无结果时 fallback：取 APKPure 第一条结果名称再搜 APKMirror。"""
-    results = _search_apkmirror_direct(session, keyword, max_results)
-    if results:
-        return results
+_HAS_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
 
-    # Fallback：用 APKPure 第一条结果的应用名搜 APKMirror
+
+def _to_pinyin(text: str) -> str:
+    """将汉字转为拼音连写（无声调），非汉字字符保留原样。"""
+    return "".join(lazy_pinyin(text))
+
+
+def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 20) -> list[tuple[str, str]]:
+    """主路径：APKMirror 直搜；含汉字时同时搜拼音；两者均无结果时 fallback APKPure。"""
+    if _HAS_CJK_RE.search(keyword):
+        pinyin_kw = _to_pinyin(keyword)
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_zh = ex.submit(_search_apkmirror_direct, session, keyword, max_results)
+            f_py = ex.submit(_search_apkmirror_direct, new_session(), pinyin_kw, max_results)
+        zh_res = f_zh.result() or []
+        py_res = f_py.result() or []
+        seen: set[str] = set()
+        results: list[tuple[str, str]] = []
+        for name, url in zh_res + py_res:
+            if url not in seen:
+                seen.add(url)
+                results.append((name, url))
+                if len(results) >= max_results:
+                    break
+        if results:
+            return results
+    else:
+        results = _search_apkmirror_direct(session, keyword, max_results)
+        if results:
+            return results
+
+    # Fallback：取 APKPure 第一条结果名称再搜 APKMirror
     ap_hits = search_apkpure(new_session(), keyword, 1)
     if not ap_hits:
         return []
