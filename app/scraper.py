@@ -878,18 +878,9 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
             logger.warning("🚨 请求失败或被拦截 %s: %s", url, e)
             return None
 
-    def _fetch_with_fallback(url_with_sort: str):
-        """带 &sortby=date 请求；若失败（WAF 针对低结果量查询返回 403），去掉该参数重试一次。"""
-        r = _fetch(url_with_sort)
-        if r is None:
-            url_nosort = url_with_sort.replace("&sortby=date", "")
-            logger.info("sortby=date 被拦截，去掉参数重试: %s", url_nosort)
-            r = _fetch(url_nosort)
-        return r
-
     # ── APPS tab ────────────────────────────────────────────────────────────
     apps_url = f"{BASE_URL}/?searchtype=app&s={requests.utils.quote(keyword)}&sortby=date"
-    r = _fetch_with_fallback(apps_url)
+    r = _fetch(apps_url)
     if r is not None and "No results found matching your query" not in r.text:
         m = _APKMIRROR_APP_RE.match(r.url)
         if m:
@@ -903,16 +894,34 @@ def _search_apkmirror_direct(session: requests.Session, keyword: str, max_result
 
     # ── APKS tab fallback（APPS tab 无结果时）───────────────────────────────
     apks_url = f"{BASE_URL}/?searchtype=apk&s={requests.utils.quote(keyword)}&sortby=date"
-    r2 = _fetch_with_fallback(apks_url)
-    if r2 is None or "No results found matching your query" in r2.text:
+    r2 = _fetch(apks_url)
+    if r2 is not None and "No results found matching your query" not in r2.text:
+        m2 = _APKMIRROR_APP_RE.match(r2.url)
+        if m2:
+            soup2 = BeautifulSoup(r2.text, "lxml")
+            h1 = soup2.select_one("h1.app-title, h1")
+            name = h1.get_text(strip=True) if h1 else keyword
+            return [(name, BASE_URL + m2.group(1) + "/")]
+        results2 = _parse_fontblack_apks(BeautifulSoup(r2.text, "lxml"), max_results)
+        if results2:
+            return results2
+
+    # ── 普通搜索页 fallback（searchtype 端点被 WAF 拦截时）──────────────────
+    # 真实浏览器走 /?s=keyword，WAF 规则更宽松，可绕过 searchtype 端点的 403
+    plain_url = f"{BASE_URL}/?s={requests.utils.quote(keyword)}"
+    logger.info("searchtype 端点被拦截，尝试普通搜索页: %s", plain_url)
+    r3 = _fetch(plain_url)
+    if r3 is None or "No results found matching your query" in r3.text:
         return []
-    m2 = _APKMIRROR_APP_RE.match(r2.url)
-    if m2:
-        soup2 = BeautifulSoup(r2.text, "lxml")
-        h1 = soup2.select_one("h1.app-title, h1")
+    m3 = _APKMIRROR_APP_RE.match(r3.url)
+    if m3:
+        soup3 = BeautifulSoup(r3.text, "lxml")
+        h1 = soup3.select_one("h1.app-title, h1")
         name = h1.get_text(strip=True) if h1 else keyword
-        return [(name, BASE_URL + m2.group(1) + "/")]
-    return _parse_fontblack_apks(BeautifulSoup(r2.text, "lxml"), max_results)
+        return [(name, BASE_URL + m3.group(1) + "/")]
+    soup3 = BeautifulSoup(r3.text, "lxml")
+    results3 = _parse_fontblack_apps(soup3, max_results) or _parse_fontblack_apks(soup3, max_results)
+    return results3
 
 
 # APKPure 应用页 URL 格式：/slug/com.package.name（第二段为合法包名）
