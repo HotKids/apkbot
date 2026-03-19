@@ -313,6 +313,8 @@ def fetch_app_name_from_rss(session: requests.Session, apk_url: str) -> str:
     try:
         r = session.get(rss_url, timeout=10,
                         headers={"Accept": "application/rss+xml, text/xml, */*"})
+        if "xml" not in r.headers.get("Content-Type", "").lower():
+            raise ValueError(f"RSS 响应非 XML (Content-Type: {r.headers.get('Content-Type')}，可能被 Cloudflare 拦截)")
         root = ET.fromstring(r.content)
         channel = root.find("channel")
         if channel is None:
@@ -338,6 +340,8 @@ def fetch_rss_latest_release_url(session: requests.Session, apk_url: str) -> Opt
     try:
         r = session.get(rss_url, timeout=10,
                         headers={"Accept": "application/rss+xml, text/xml, */*"})
+        if "xml" not in r.headers.get("Content-Type", "").lower():
+            raise ValueError(f"RSS 响应非 XML (Content-Type: {r.headers.get('Content-Type')}，可能被 Cloudflare 拦截)")
         root = ET.fromstring(r.content)
         channel = root.find("channel")
         item = channel.find("item") if channel is not None else None
@@ -598,6 +602,11 @@ def resolve_final_apk_url(session: requests.Session, download_page_url: str, ref
     global _KNOWN_SUCCESSFUL_ACTION
     _key_m = re.search(r"[?&]key=([a-f0-9]+)", download_page_url)
     _post_id = _extract_post_id(soup, html)
+    if not (_key_m and _post_id):
+        logger.warning(
+            "AJAX 兜底跳过：缺少必要参数 (key=%s, post_id=%s, url=%s)",
+            bool(_key_m), bool(_post_id), download_page_url,
+        )
     if _key_m and _post_id:
         _dl_key = _key_m.group(1)
         _forcebase = "true" if "forcebaseapk" in download_page_url else "false"
@@ -795,13 +804,23 @@ _apk_ver_re = re.compile(r"^(/apk/[^/]+/[^/]+)/[^/]+/?$")
 
 def _parse_fontblack_apps(soup: BeautifulSoup, max_results: int) -> list[tuple[str, str]]:
     """APPS tab：只收 2 段 app URL，3 段版本 URL（侧边栏热门）直接跳过。"""
+    from urllib.parse import urlparse
     results: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for a in soup.select("a.fontBlack"):
+    # 扩展选择器：新结构用 .appRowTitle a，保留 a.fontBlack 做兜底，最后降级到全页扫描
+    candidates = (
+        soup.select(".appRowTitle a, a.fontBlack, .listWidget .appRow a")
+        or soup.select("a[href]")
+    )
+    for a in candidates:
         href = a.get("href", "")
-        if not _apk_2seg_re.match(href):
+        if not href:
             continue
-        url = BASE_URL + href.rstrip("/") + "/"
+        # 兼容绝对路径（偶尔出现 https://www.apkmirror.com/apk/...）
+        path = urlparse(href).path if href.startswith("http") else href
+        if not _apk_2seg_re.match(path):
+            continue
+        url = BASE_URL + path.rstrip("/") + "/"
         name = a.get_text(strip=True)
         if url not in seen and name:
             seen.add(url)
