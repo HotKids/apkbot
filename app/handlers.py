@@ -300,7 +300,7 @@ def handle_sub(message: Message):
 
     added = add_subscription(message.chat.id, url)
     if not added:
-        bot.reply_to(message, "🔄 已订阅该应用。正在为您手动抓取当前最新版本，请稍等……")
+        bot.reply_to(message, "⏬ 已订阅该应用。正在为您手动抓取当前最新版本，请稍等……")
         threading.Thread(target=_send_current_version, args=(message.chat.id, url), daemon=True).start()
         return
     bot.reply_to(message, f"✅ 订阅成功！正在获取当前最新版本，请稍等……\n<code>{html.escape(url)}</code>")
@@ -334,7 +334,7 @@ def handle_dl(message: Message):
     if url is None:
         return
 
-    bot.reply_to(message, f"🔄 正在下载，请稍等……\n<code>{html.escape(url)}</code>")
+    bot.reply_to(message, f"⏬ 正在下载，请稍等……\n<code>{html.escape(url)}</code>")
     threading.Thread(target=_download_once, args=(message.chat.id, url), daemon=True).start()
 
 
@@ -369,7 +369,7 @@ def handle_unsub(message: Message):
             bot.reply_to(message, "❌ 未找到该订阅，请检查 URL 是否正确。")
 
 
-@bot.message_handler(commands=["sublist"])
+@bot.message_handler(commands=["list"])
 def handle_sublist(message: Message):
     if not _require_allowed(message):
         return
@@ -409,29 +409,31 @@ def handle_status(message: Message):
     bot.reply_to(message, "\n".join(lines))
 
 
-@bot.message_handler(commands=["adduser"])
+@bot.message_handler(commands=["add"])
 def handle_adduser(message: Message):
     if not _require_owner(message):
         return
-    parts = message.text.split(maxsplit=1)
+    parts = message.text.split(maxsplit=2)
     if len(parts) < 2 or not parts[1].strip().lstrip("-").isdigit():
-        bot.reply_to(message, "用法：/adduser &lt;user_id&gt;")
+        bot.reply_to(message, "用法：/add &lt;user_id&gt; [备注]")
         return
     uid = int(parts[1].strip())
-    added = add_to_whitelist(uid)
+    remark = parts[2].strip() if len(parts) > 2 else ""
+    added = add_to_whitelist(uid, remark)
+    remark_str = f"（{html.escape(remark)}）" if remark else ""
     if added:
-        bot.reply_to(message, f"✅ 已添加用户 <code>{uid}</code> 到白名单。")
+        bot.reply_to(message, f"✅ 已添加用户 <code>{uid}</code>{remark_str} 到白名单。")
     else:
         bot.reply_to(message, f"⚠️ 用户 <code>{uid}</code> 已在白名单中。")
 
 
-@bot.message_handler(commands=["deluser"])
+@bot.message_handler(commands=["del"])
 def handle_deluser(message: Message):
     if not _require_owner(message):
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip().lstrip("-").isdigit():
-        bot.reply_to(message, "用法：/deluser &lt;user_id&gt;")
+        bot.reply_to(message, "用法：/del &lt;user_id&gt;")
         return
     uid = int(parts[1].strip())
     removed = remove_from_whitelist(uid)
@@ -441,13 +443,49 @@ def handle_deluser(message: Message):
         bot.reply_to(message, f"❌ 用户 <code>{uid}</code> 不在白名单中。")
 
 
-@bot.message_handler(commands=["listusers"])
+@bot.message_handler(commands=["user"])
 def handle_listusers(message: Message):
     if not _require_owner(message):
         return
     users = get_whitelist()
     if not users:
-        bot.reply_to(message, "白名单为空。使用 /adduser &lt;user_id&gt; 添加。")
+        bot.reply_to(message, "白名单为空。使用 /add &lt;user_id&gt; [备注] 添加。")
     else:
-        lines = "\n".join(f"• <code>{uid}</code>" for uid in users)
+        lines = "\n".join(
+            "• " + (f"{html.escape(remark)}  " if remark else "") + f"<code>{uid}</code>"
+            for uid, remark in users
+        )
         bot.reply_to(message, f"白名单（{len(users)} 人）：\n{lines}")
+
+
+@bot.message_handler(commands=["help"])
+def handle_help(message: Message):
+    if not _require_owner(message):
+        return
+    bot.reply_to(
+        message,
+        "<b>🤖 APKDL TG Bot</b>\n"
+        "\n"
+        "<b>📦 订阅管理</b>\n"
+        "/sub &lt;链接或包名&gt; — 订阅应用更新\n"
+        "/unsub &lt;链接或包名&gt; — 取消订阅\n"
+        "/list — 查看订阅列表\n"
+        "\n"
+        "<b>⏬ 立即下载</b>\n"
+        "/dl &lt;链接或包名&gt; — 下载最新版 APK\n"
+        "\n"
+        "<b>支持格式：</b>\n"
+        "<code>https://www.apkmirror.com/apk/…</code>\n"
+        "<code>https://play.google.com/store/apps/details?id=…</code>\n"
+        "<code>com.android.chrome</code>\n"
+        "\n"
+        "<b>🔍 状态</b>\n"
+        "/check — 立即检查所有订阅更新\n"
+        "/status — 查看各订阅当前版本\n"
+        "\n"
+        "<b>👥 用户管理</b>\n"
+        "/add &lt;id&gt; [备注] — 添加白名单用户\n"
+        "/del &lt;id&gt; — 移除用户\n"
+        "/user — 查看白名单\n"
+        "/help — 显示本帮助",
+    )
