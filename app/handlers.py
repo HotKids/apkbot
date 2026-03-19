@@ -30,7 +30,9 @@ from database import (
     update_apk_version,
 )
 from scraper import (
+    _release_path_from_variant_url,
     cleanup_after_push,
+    fetch_rss_latest_release_url,
     new_session,
     resolve_and_download,
     resolve_package_to_apkmirror_url,
@@ -144,6 +146,22 @@ def _check_single_url(apk_url: str) -> str:
     apk_path: Optional[Path] = None
     try:
         session = new_session()
+
+        # ── 快速 RSS 预检：无更新时直接返回，避免触发完整抓取 ──────────────
+        rss_release_url = fetch_rss_latest_release_url(session, apk_url)
+        if rss_release_url:
+            db_row = get_apk_version(apk_url)
+            if db_row and db_row["last_variant_url"]:
+                last_release_path = _release_path_from_variant_url(db_row["last_variant_url"])
+                rss_path = rss_release_url.split("apkmirror.com")[-1]
+                if rss_path == last_release_path:
+                    update_apk_version(apk_url, last_checked_at=now_iso())
+                    app_label = html.escape(apk_url.rstrip("/").split("/")[-1])
+                    stored_ver = db_row["last_version_name"] or "—"
+                    logger.info("RSS 预检：%s 无更新（%s）", apk_url, stored_ver)
+                    return f"无更新：{app_label}（{html.escape(stored_ver)}）"
+        # ── RSS 显示有新版本，或首次检查，或 RSS 不可用 → 走完整流程 ────────
+
         variant = scrape_and_pick(session, apk_url)
         apk_path, sha256 = resolve_and_download(session, variant)
 

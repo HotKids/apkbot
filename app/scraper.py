@@ -302,6 +302,32 @@ def parse_variants(session: requests.Session, release_url: str) -> list[Variant]
 # 过滤 & 打分 & 选择（委托给 selector 模块）
 # ---------------------------------------------------------------------------
 
+def fetch_rss_latest_release_url(session: requests.Session, apk_url: str) -> Optional[str]:
+    """从 APKMirror RSS feed 获取最新一条 release 的页面 URL。
+    失败时返回 None，调用方回退到完整 HTML 抓取流程。"""
+    import xml.etree.ElementTree as ET
+    rss_url = apk_url.rstrip("/") + "/feed/"
+    try:
+        r = session.get(rss_url, timeout=10,
+                        headers={"Accept": "application/rss+xml, text/xml, */*"})
+        root = ET.fromstring(r.content)
+        channel = root.find("channel")
+        item = channel.find("item") if channel is not None else None
+        if item is None:
+            return None
+        link = (item.findtext("link") or "").strip()
+        return link.rstrip("/") + "/" if link else None
+    except Exception as e:
+        logger.debug("RSS fetch 失败 %s: %s", apk_url, e)
+        return None
+
+
+def _release_path_from_variant_url(variant_url: str) -> str:
+    """从 variant URL 推导上一级的 release URL 路径。
+    e.g. /apk/foo/bar/bar-1-0-release/bar-1-0-download/ → /apk/foo/bar/bar-1-0-release/"""
+    return "/".join(variant_url.rstrip("/").split("/")[:-1]) + "/"
+
+
 def scrape_and_pick(session: requests.Session, apk_url: str) -> Variant:
     """完整抓取 + 过滤 + 打分，返回最佳 Variant（未下载）。"""
     release_url = get_release_url(session, apk_url)
