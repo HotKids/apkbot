@@ -878,38 +878,17 @@ def search_apkpure(session: requests.Session, keyword: str, max_results: int = 5
 
 
 def search_apkmirror(session: requests.Session, keyword: str, max_results: int = 5) -> list[tuple[str, str]]:
-    """主路径：APKMirror 直搜；无结果时 fallback：APKPure 搜索 → 提取包名 → 映射 APKMirror。"""
+    """主路径：APKMirror 直搜；无结果时 fallback：取 APKPure 第一条结果名称再搜 APKMirror。"""
     results = _search_apkmirror_direct(session, keyword, max_results)
     if results:
         return results
 
-    # Fallback：APKPure 搜索结果的 URL 里含包名，用包名再查 APKMirror
-    ap_hits = search_apkpure(new_session(), keyword, max_results * 2)
-    pkgs: list[str] = []
-    seen_pkgs: set[str] = set()
-    for _name, url in ap_hits:
-        m = _APKPURE_APP_URL_RE.match(url.removeprefix(_APKPURE_BASE))
-        if m:
-            pkg = m.group(1)
-            if pkg not in seen_pkgs:
-                seen_pkgs.add(pkg)
-                pkgs.append(pkg)
-    if not pkgs:
+    # Fallback：用 APKPure 第一条结果的应用名搜 APKMirror
+    ap_hits = search_apkpure(new_session(), keyword, 1)
+    if not ap_hits:
         return []
-
-    seen_urls: set[str] = set()
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        for fut in as_completed({ex.submit(_pkg_to_apkmirror, new_session(), p): p for p in pkgs}):
-            try:
-                res = fut.result()
-            except Exception:
-                continue
-            if res and res[1] not in seen_urls:
-                seen_urls.add(res[1])
-                results.append(res)
-                if len(results) >= max_results:
-                    break
-    return results
+    first_name, _ = ap_hits[0]
+    return _search_apkmirror_direct(session, first_name, max_results)
 
 
 # ---------------------------------------------------------------------------
