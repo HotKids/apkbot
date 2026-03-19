@@ -63,16 +63,6 @@ def init_db() -> None:
             conn.execute("ALTER TABLE apk_versions ADD COLUMN last_type TEXT")
         except sqlite3.OperationalError:
             pass
-        # 迁移：规范化历史订阅 URL（补充尾部斜杠），然后删除重复行
-        conn.execute(
-            "UPDATE subscriptions SET apk_url = rtrim(apk_url, '/') || '/' "
-            "WHERE apk_url NOT LIKE '%/'"
-        )
-        conn.execute(
-            "DELETE FROM subscriptions WHERE id NOT IN ("
-            "  SELECT MIN(id) FROM subscriptions GROUP BY chat_id, apk_url"
-            ")"
-        )
 
 
 # ---------------------------------------------------------------------------
