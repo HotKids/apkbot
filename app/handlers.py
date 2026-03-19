@@ -86,16 +86,14 @@ def _build_search_keyboard(sid: str, results: list, page: int) -> InlineKeyboard
             f"{icon} {name}",
             callback_data=f"sp:{sid}:{start + i}",
         ))
-    prev_btn = InlineKeyboardButton(
-        "◀ 上一页" if page > 0 else "　",
-        callback_data=f"sg:{sid}:{page - 1}" if page > 0 else "noop",
-    )
-    page_btn = InlineKeyboardButton(f"📄 {page + 1}/{pages}", callback_data="noop")
-    next_btn = InlineKeyboardButton(
-        "下一页 ▶" if page < pages - 1 else "　",
-        callback_data=f"sg:{sid}:{page + 1}" if page < pages - 1 else "noop",
-    )
-    markup.row(prev_btn, page_btn, next_btn)
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"sg:{sid}:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"📄 {page + 1}/{pages}", callback_data="noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"sg:{sid}:{page + 1}"))
+        markup.row(*nav)
     markup.add(InlineKeyboardButton("❌ 取消", callback_data=f"sc:{sid}"))
     return markup
 
