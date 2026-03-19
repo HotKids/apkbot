@@ -81,11 +81,8 @@ def _build_search_keyboard(sid: str, results: list, page: int) -> InlineKeyboard
     pages = max(1, (total + _SEARCH_PAGE_SIZE - 1) // _SEARCH_PAGE_SIZE)
     start = page * _SEARCH_PAGE_SIZE
     markup = InlineKeyboardMarkup()
-    for i, (icon, name, _url) in enumerate(results[start:start + _SEARCH_PAGE_SIZE]):
-        markup.add(InlineKeyboardButton(
-            f"{icon} {name}",
-            callback_data=f"sp:{sid}:{start + i}",
-        ))
+    for i, (icon, name, _url, pkg) in enumerate(results[start:start + _SEARCH_PAGE_SIZE]):
+        markup.add(InlineKeyboardButton(f"{icon} {name}", callback_data=f"sp:{sid}:{start + i}"))
     if pages > 1:
         nav = []
         if page > 0:
@@ -110,8 +107,8 @@ def _do_keyword_search(message: Message, keyword: str, mode: str) -> None:
         with ThreadPoolExecutor(max_workers=2) as ex:
             f_am = ex.submit(search_apkmirror, new_session(), keyword)
             f_ap = ex.submit(search_apkpure, new_session(), keyword)
-            am_list = [("🟠", n, u) for n, u in (f_am.result() or [])]
-            ap_list = [("🟢", n, u) for n, u in (f_ap.result() or [])]
+            am_list = [("🟠", n, u, None) for n, u in (f_am.result() or [])]
+            ap_list = [("🟢", n, u, None) for n, u in (f_ap.result() or [])]
         # 合并：按相关性升序 + 同分时交叉排列（APKMirror 先），显示全部结果
         def _rel(name: str) -> int:
             n, kw = name.lower(), keyword.lower()
@@ -722,7 +719,7 @@ def handle_search_callback(call: CallbackQuery):
         if not sess:
             bot.answer_callback_query(call.id, "⚠️ 会话已过期。")
             return
-        icon, name, apk_url = sess["results"][int(idx_str)]
+        icon, name, apk_url, _pkg = sess["results"][int(idx_str)]
         mode = sess["mode"]
         chat_id = sess["chat_id"]
         bot.answer_callback_query(call.id)
