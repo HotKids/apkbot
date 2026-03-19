@@ -65,7 +65,7 @@ _search_sessions: dict[str, dict] = {}    # sid → {results, mode, chat_id}
 
 # 标准包名：至少含一个点，仅 ASCII 字母数字 + _ + .
 _PKG_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$')
-_SEARCH_PAGE_SIZE = 3
+_SEARCH_PAGE_SIZE = 5
 _APKPURE_PKG_RE = re.compile(
     r"https?://apkpure\.com/[^/]+/([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+)$"
 )
