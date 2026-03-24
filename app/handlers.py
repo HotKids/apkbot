@@ -4,6 +4,7 @@ import re
 import threading
 import time
 import uuid as _uuid_mod
+from urllib.parse import unquote as _url_unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -402,6 +403,57 @@ def _download_once(chat_id: int, apk_url: str, status_msg_id: Optional[int] = No
             cleanup_after_push(apk_path)
 
 
+def _download_am_with_fallback(chat_id: int, am_url: str, ap_url: str, status_msg_id: int) -> None:
+    """先尝试 APKMirror，失败后自动 fallback 到 APKPure。"""
+    apk_path: Optional[Path] = None
+    try:
+        session = new_session()
+        variant = scrape_and_pick(session, am_url)
+        apk_path, sha256 = resolve_and_download(session, variant)
+        _send_apk_to_user(chat_id, variant, apk_path, sha256)
+        try:
+            bot.edit_message_text("✅ 下载完成（APKMirror）", chat_id, status_msg_id)
+            time.sleep(60)
+            bot.delete_message(chat_id, status_msg_id)
+        except Exception:
+            pass
+        return
+    except Exception as e:
+        logger.warning("APKMirror 下载失败，fallback APKPure：%s → %s", am_url, e)
+        if apk_path is not None:
+            cleanup_after_push(apk_path)
+            apk_path = None
+    # fallback APKPure
+    try:
+        bot.edit_message_text(
+            f"⚠️ APKMirror 下载失败，正在尝试 APKPure……\n<code>{html.escape(_url_unquote(ap_url))}</code>",
+            chat_id, status_msg_id, parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    try:
+        session = new_session()
+        variant = scrape_and_pick_apkpure(session, ap_url)
+        apk_path, sha256 = resolve_and_download_apkpure(session, variant)
+        _send_apk_to_user(chat_id, variant, apk_path, sha256)
+        try:
+            bot.edit_message_text("✅ 下载完成（APKPure）", chat_id, status_msg_id)
+            time.sleep(60)
+            bot.delete_message(chat_id, status_msg_id)
+        except Exception:
+            pass
+    except Exception as e2:
+        logger.exception("APKPure fallback 也失败：chat_id=%s url=%s", chat_id, ap_url)
+        err_text = f"❌ 下载失败（APKMirror 和 APKPure 均不可用）：{html.escape(str(e2))}"
+        try:
+            bot.edit_message_text(err_text, chat_id, status_msg_id, parse_mode="HTML")
+        except Exception:
+            _safe_send(chat_id, err_text)
+    finally:
+        if apk_path is not None:
+            cleanup_after_push(apk_path)
+
+
 # ---------------------------------------------------------------------------
 # Bot 命令处理
 # ---------------------------------------------------------------------------
@@ -725,11 +777,11 @@ def handle_app_search_callback(call: CallbackQuery):
             uid = _uuid_mod.uuid4().hex[:8]
             _app_actions[uid] = {"name": name, "ap_url": apkpure_url, "am_url": am_url}
             has_am = bool(am_url)
-            src_line = f"APKMirror：<code>{html.escape(am_url)}</code>\n" if am_url else "APKMirror：❌ 未收录\n"
+            src_line = f"APKMirror：<code>{html.escape(_url_unquote(am_url))}</code>\n" if am_url else "APKMirror：❌ 未收录\n"
             text = (
                 f"<b>{html.escape(name)}</b>\n"
                 + src_line
-                + f"APKPure：<code>{html.escape(apkpure_url)}</code>\n\n"
+                + f"APKPure：<code>{html.escape(_url_unquote(apkpure_url))}</code>\n\n"
                 + "请选择操作："
             )
             try:
@@ -782,16 +834,16 @@ def handle_app_action_callback(call: CallbackQuery):
 
     if data.startswith("aad_ap:"):
         status_msg = bot.send_message(
-            chat_id, f"⏬ 正在下载（APKPure）……\n<code>{html.escape(ap_url)}</code>", parse_mode="HTML",
+            chat_id, f"⏬ 正在下载（APKPure）……\n<code>{html.escape(_url_unquote(ap_url))}</code>", parse_mode="HTML",
         )
         threading.Thread(target=_download_once, args=(chat_id, ap_url, status_msg.message_id), daemon=True).start()
         return
 
     if data.startswith("aad_am:") and am_url:
         status_msg = bot.send_message(
-            chat_id, f"⏬ 正在下载（APKMirror）……\n<code>{html.escape(am_url)}</code>", parse_mode="HTML",
+            chat_id, f"⏬ 正在下载（APKMirror）……\n<code>{html.escape(_url_unquote(am_url))}</code>", parse_mode="HTML",
         )
-        threading.Thread(target=_download_once, args=(chat_id, am_url, status_msg.message_id), daemon=True).start()
+        threading.Thread(target=_download_am_with_fallback, args=(chat_id, am_url, ap_url, status_msg.message_id), daemon=True).start()
         return
 
     if data.startswith("aas_am:") and am_url:
