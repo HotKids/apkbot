@@ -323,7 +323,11 @@ def _resolve_to_apkmirror_url(message: Message, input_str: str) -> Optional[str]
         status_msg = bot.reply_to(message, f"🔄 正在通过包名 <code>{html.escape(package_name)}</code> 搜索 APKMirror……")
         try:
             session = new_session()
-            mapped_url = resolve_package_to_apkmirror_url(session, package_name)
+            mapped_url = None
+            try:
+                mapped_url = resolve_package_to_apkmirror_url(session, package_name)
+            except Exception as am_err:
+                logger.warning("APKMirror 包名解析失败（%s），跳过 APKMirror：%s", package_name, am_err)
             if mapped_url:
                 url = mapped_url.split("?")[0].rstrip("/") + "/"
                 bot.edit_message_text(
@@ -331,7 +335,7 @@ def _resolve_to_apkmirror_url(message: Message, input_str: str) -> Optional[str]
                     message.chat.id, status_msg.message_id, parse_mode="HTML",
                 )
                 return url
-            # APKMirror 未收录 → 尝试 APKPure
+            # APKMirror 未收录或请求失败 → 尝试 APKPure
             bot.edit_message_text(
                 f"⚠️ APKMirror 未收录，正在尝试 APKPure……",
                 message.chat.id, status_msg.message_id, parse_mode="HTML",
