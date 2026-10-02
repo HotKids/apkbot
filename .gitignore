@@ -1,10 +1,14 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 data/
 *.db
+*.db-wal
+*.db-shm
 *.apk
 .DS_Store
 *.egg-info/
@@ -12,3 +16,5 @@ dist/
 build/
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/

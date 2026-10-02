@@ -1,0 +1,372 @@
+"""Galaxy Store protocol and identity rules; no I/O or Telegram dependencies."""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from hashlib import sha256
+import re
+import time
+from urllib.parse import urlsplit
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+import xml.etree.ElementTree as ET
+
+from defusedxml.ElementTree import fromstring
+from defusedxml.common import DefusedXmlException
+
+
+class StoreError(Exception):
+    """Safe error text, without service bodies or signed URLs."""
+
+
+class InvalidInput(StoreError):
+    pass
+
+
+class NoAvailableVersion(StoreError):
+    pass
+
+
+class StubRestricted(StoreError):
+    pass
+
+
+class LoginRequired(StoreError):
+    pass
+
+
+class ServiceError(StoreError):
+    pass
+
+
+class TransportError(StoreError):
+    pass
+
+
+class InvalidResponse(StoreError):
+    pass
+
+
+class DownloadError(StoreError):
+    pass
+
+
+class VersionDrift(DownloadError):
+    pass
+
+
+PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+")
+
+
+@dataclass(frozen=True)
+class AppRequest:
+    package: str
+    region: str = "AUTO"
+
+    def __post_init__(self):
+        if (
+            len(self.package) > 255
+            or not PACKAGE.fullmatch(self.package)
+            or self.region not in {"AUTO", "US", "CN"}
+        ):
+            raise InvalidInput(
+                "请输入有效包名或 Galaxy Store 详情链接，可追加 CN 或 US。"
+            )
+
+    @property
+    def key(self):
+        return sha256(f"{self.package}:{self.region}".encode()).hexdigest()[:32]
+
+
+def parse_input(text):
+    parts = text.split()
+    if not 1 <= len(parts) <= 2:
+        raise InvalidInput("用法：包名或 Galaxy Store 详情链接 [CN|US]")
+    value = parts[0]
+    if ":" in value or "/" in value:
+        try:
+            u = urlsplit(value)
+        except ValueError:
+            raise InvalidInput("Galaxy Store 详情链接不合法。") from None
+        if (
+            u.scheme != "https"
+            or u.netloc != "galaxystore.samsung.com"
+            or "?" in value
+            or "#" in value
+            or not u.path.startswith("/detail/")
+            or u.path.count("/") != 2
+        ):
+            raise InvalidInput(
+                "仅接受 https://galaxystore.samsung.com/detail/<包名>，不带查询参数。"
+            )
+        value = u.path[len("/detail/") :]
+    return AppRequest(value, parts[1].upper() if len(parts) == 2 else "AUTO")
+
+
+@dataclass(frozen=True)
+class Release:
+    package: str
+    region: str
+    product_id: str
+    name: str
+    version_name: str
+    version_code: int
+    size: int | None = None
+    channel: str = "ods"
+    needs_login: bool = False
+    installable: bool = True
+
+    @property
+    def identity(self):
+        return f"{self.region}:{self.product_id}:{self.version_code}"
+
+
+@dataclass(frozen=True)
+class DownloadGrant:
+    release: Release
+    url: str = field(repr=False)
+    size: int = 0
+
+
+def xml_fields(data: bytes, root_name: str):
+    if not data or len(data) > 2_000_000:
+        raise InvalidResponse("商店 XML 为空或过大。")
+    try:
+        root = fromstring(
+            data, forbid_dtd=True, forbid_entities=True, forbid_external=True
+        )
+    except (ET.ParseError, DefusedXmlException, ValueError):
+        raise InvalidResponse("商店 XML 格式不合法。") from None
+    if root.tag != root_name:
+        raise InvalidResponse("商店 XML 根元素不匹配。")
+    fields = {}
+    for node in root.iter():
+        if len(node):
+            continue
+        key = node.attrib.get("name", node.tag)
+        if key in fields:
+            raise InvalidResponse("商店 XML 含有重复字段。")
+        fields[key] = (node.text or "").strip()
+        if key == "errorString" and "errorCode" in node.attrib:
+            if "errorCode" in fields:
+                raise InvalidResponse("商店 XML 含有重复错误码。")
+            fields["errorCode"] = node.attrib["errorCode"]
+    return fields
+
+
+def required(fields, key):
+    value = fields.get(key, "")
+    if not value:
+        raise InvalidResponse(f"商店响应缺少 {key}。")
+    return value
+
+
+def positive(fields, key):
+    raw = required(fields, key)
+    if not raw.isascii() or not raw.isdecimal() or len(raw) > 19 or int(raw) <= 0:
+        raise InvalidResponse(f"商店响应的 {key} 不合法。")
+    return int(raw)
+
+
+def _identity(fields, package, guid_key, product_key):
+    if required(fields, guid_key) != package:
+        raise InvalidResponse("商店响应包名不匹配。")
+    product = required(fields, product_key)
+    if not re.fullmatch(r"[0-9]{1,30}", product):
+        raise InvalidResponse("商店响应的产品 ID 不合法。")
+    return product
+
+
+def check_stub_status(fields):
+    if fields.get("resultCode") == "1":
+        return
+    message = fields.get("resultMsg", "").casefold().rstrip(".")
+    if message in {
+        "application is not approved as stub",
+        "application is not allowed to use stubdownload",
+    }:
+        raise StubRestricted("该应用不允许使用 stub 通道；这不代表商店没有 APK。")
+    # Device/carrier/profile mismatch and unknown responses are not absence.
+    if message == "application is not available in this country":
+        raise NoAvailableVersion("该应用在请求的地区不可用。")
+    if "login" in message or "log in" in message:
+        raise LoginRequired("商店要求登录，不能匿名下载。")
+    raise ServiceError("stub 查询失败，无法确认地区可用性。")
+
+
+def parse_stub(data, package, region):
+    fields = xml_fields(data, "result")
+    check_stub_status(fields)
+    product = _identity(fields, package, "appId", "productId")
+    release = Release(
+        package,
+        region,
+        product,
+        fields.get("productName") or package,
+        required(fields, "versionName"),
+        positive(fields, "versionCode"),
+        positive(fields, "contentSize"),
+        "stub",
+    )
+    return DownloadGrant(release, required(fields, "downloadURI"), release.size)
+
+
+def check_ods_status(fields):
+    status = fields.get("errorString", "")
+    code = required(fields, "errorCode")
+    if code != "0" or status.casefold() not in {"", "success"}:
+        if "login" in status.casefold() or "log in" in status.casefold():
+            raise LoginRequired("商店要求登录，不能匿名下载。")
+        raise ServiceError("ODS 服务拒绝请求；不能据此认定应用不存在。")
+
+
+def parse_ods_metadata(data, package):
+    fields = xml_fields(data, "SamsungProtocol")
+    check_ods_status(fields)
+    product = _identity(fields, package, "GUID", "productID")
+    login = required(fields, "needToLogin")
+    installable = required(fields, "installableYN")
+    if login not in {"0", "1"} or installable not in {"Y", "N"}:
+        raise InvalidResponse("商店登录或安装状态不合法。")
+    return Release(
+        package,
+        "CN",
+        product,
+        fields.get("productName") or package,
+        required(fields, "version"),
+        positive(fields, "versionCode"),
+        positive(fields, "realContentsSize")
+        if fields.get("realContentsSize")
+        else None,
+        needs_login=login == "1",
+        installable=installable == "Y",
+    )
+
+
+def parse_ods_grant(data, release):
+    fields = xml_fields(data, "SamsungProtocol")
+    check_ods_status(fields)
+    if required(fields, "productID") != release.product_id:
+        raise InvalidResponse("下载授权的产品 ID 不匹配。")
+    if "GUID" in fields and fields["GUID"] != release.package:
+        raise InvalidResponse("下载授权的包名不匹配。")
+    if fields.get("binaryArch") != "64":
+        raise InvalidResponse("下载授权未提供预期的 64 位完整 APK。")
+    if "version" in fields and fields["version"] != release.version_name:
+        raise VersionDrift("商店版本已改变，请重新查询后下载。")
+    if (
+        "versionCode" in fields
+        and positive(fields, "versionCode") != release.version_code
+    ):
+        raise VersionDrift("商店版本已改变，请重新查询后下载。")
+    size = positive(fields, "contentsSize")
+    if release.size is not None and size != release.size:
+        raise VersionDrift("下载授权的大小与选定版本不一致，请重新查询。")
+    return DownloadGrant(release, required(fields, "downLoadURI"), size)
+
+
+@dataclass
+class OdsProfile:
+    identity: str = field(default_factory=lambda: uuid4().hex[:16], repr=False)
+
+    def envelope(self, method, request_id, params):
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        transaction = (
+            str(now.day)
+            + sha256(
+                (self.identity + now.strftime("%Y%m%d%H") + "GalaxyApps").encode()
+            ).hexdigest()[:7]
+        )
+        attrs = dict(
+            networkType="0",
+            version2="0",
+            lang="zh_CN",
+            openApiVersion="36",
+            deviceModel="SM-S9480",
+            deviceMakerName="samsung",
+            deviceMakerType="0",
+            mcc="460",
+            mnc="00",
+            csc="CHC",
+            odcVersion="4.6.11.4",
+            storeFilter="themeDeviceModel=SM-S9480_TM",
+            supportFeature="",
+            version="7.9",
+            filter="1",
+            odcType="01",
+            storeMode="0",
+            cacheVersion="1",
+            systemId=str(int(time.time() * 1000)),
+            sessionId=transaction + now.strftime("%Y%m%d%H%M"),
+            logId=self.identity,
+            deviceFeature="locale=zh_CN||abi32=armeabi-v7a:armeabi||abi64=arm64-v8a",
+            userMode="0",
+            asaaMode="0",
+        )
+        root = ET.Element("SamsungProtocol", attrs)
+        request = ET.SubElement(
+            root,
+            "request",
+            name=method,
+            id=request_id,
+            numParam=str(len(params)),
+            transactionId=transaction,
+        )
+        for key, value in params.items():
+            ET.SubElement(request, "param", name=key).text = value
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def metadata(self, package):
+        return self.envelope(
+            "getDownloadInfo",
+            "2298",
+            dict(
+                mode="directDownload",
+                guid=package,
+                productID="",
+                imei=self.identity,
+                extuk=self.identity,
+                stduk=self.identity,
+                predeployed="0",
+                unifiedPaymentYN="Y",
+                lkAppIncludedYN="Y",
+                betaTestYN="N",
+                minorYN="N",
+                stateCode="",
+            ),
+        )
+
+    def download(self, release):
+        return self.envelope(
+            "downloadForRestore",
+            "2316",
+            dict(
+                GUID=release.package,
+                productID=release.product_id,
+                imei=self.identity,
+                extuk=self.identity,
+                stduk=self.identity,
+                downloadType="new",
+                autoUpdateYN="N",
+                triggeredFrom="DETAIL_PAGE",
+                predeployed="0",
+                deepLinkSource="",
+                resumeYN="N",
+            ),
+        )
+
+
+def match_cn_notes(response, release):
+    """Only exact CN package/versionName binding. Never infer a VersionCode."""
+    if not isinstance(response, dict):
+        return None
+    detail = response.get("DetailMain")
+    if not isinstance(detail, dict):
+        return None
+    if (
+        response.get("appId") != release.package
+        or detail.get("countryCode") != "CHN"
+        or detail.get("contentBinaryVersion") != release.version_name
+    ):
+        return None
+    notes = detail.get("contentNewDescription")
+    return notes.strip() if isinstance(notes, str) and notes.strip() else None

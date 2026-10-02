@@ -1,233 +1,201 @@
+"""Additive SQLite migration: legacy subscriptions remain stored and inactive."""
+
+from contextlib import contextmanager
+from dataclasses import asdict
+from datetime import datetime, timezone
+import json
 import sqlite3
 import threading
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Optional
 
 from config import DB_PATH
+from galaxy_store import AppRequest, Release
 
-db_lock = threading.Lock()
+_lock = threading.RLock()
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 @contextmanager
 def db_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+    with _lock:
+        connection = sqlite3.connect(DB_PATH, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
 
-def _normalize_apk_url(url: str) -> str:
-    """规范化 APKMirror URL：去除 query string，确保尾部有斜杠。"""
-    return url.split("?")[0].rstrip("/") + "/"
-
-
-def init_db() -> None:
-    with db_lock, db_conn() as conn:
-        conn.executescript(
-            """
+def init_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with db_conn() as db:
+        db.executescript("""
             CREATE TABLE IF NOT EXISTS whitelist (
-                user_id    INTEGER PRIMARY KEY,
-                added_at   TEXT NOT NULL,
-                remark     TEXT
+                user_id INTEGER PRIMARY KEY, added_at TEXT NOT NULL, remark TEXT
             );
+            CREATE TABLE IF NOT EXISTS galaxy_apps (
+                app_key TEXT PRIMARY KEY, package TEXT NOT NULL, preference TEXT NOT NULL,
+                release_json TEXT, notes TEXT, checked_at TEXT,
+                UNIQUE(package, preference)
+            );
+            CREATE TABLE IF NOT EXISTS galaxy_subscriptions (
+                chat_id INTEGER NOT NULL, app_key TEXT NOT NULL REFERENCES galaxy_apps(app_key),
+                created_at TEXT NOT NULL, last_notified TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(chat_id, app_key)
+            );
+        """)
+        columns = {r["name"] for r in db.execute("PRAGMA table_info(whitelist)")}
+        if "remark" not in columns:
+            db.execute("ALTER TABLE whitelist ADD COLUMN remark TEXT")
 
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id    INTEGER NOT NULL,
-                apk_url    TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(chat_id, apk_url)
-            );
 
-            CREATE TABLE IF NOT EXISTS apk_versions (
-                apk_url           TEXT PRIMARY KEY,
-                last_variant_url  TEXT,
-                last_version_name TEXT,
-                last_version_code INTEGER,
-                last_sha256       TEXT,
-                last_type         TEXT,
-                last_checked_at   TEXT,
-                last_pushed_at    TEXT
-            );
-            """
+def add_to_whitelist(user_id, remark=""):
+    with db_conn() as db:
+        return (
+            db.execute(
+                "INSERT OR IGNORE INTO whitelist(user_id,added_at,remark) VALUES(?,?,?)",
+                (user_id, now_iso(), remark),
+            ).rowcount
+            > 0
         )
-        # 兼容旧数据库：补充列（已存在则忽略）
-        for sql in [
-            "ALTER TABLE apk_versions ADD COLUMN last_type TEXT",
-            "ALTER TABLE whitelist ADD COLUMN remark TEXT",
-        ]:
-            try:
-                conn.execute(sql)
-            except sqlite3.OperationalError:
-                pass
 
 
-# ---------------------------------------------------------------------------
-# 白名单
-# ---------------------------------------------------------------------------
+def remove_from_whitelist(user_id):
+    with db_conn() as db:
+        return (
+            db.execute("DELETE FROM whitelist WHERE user_id=?", (user_id,)).rowcount > 0
+        )
 
-def add_to_whitelist(user_id: int, remark: str = "") -> bool:
-    """添加用户到白名单，返回 True 表示新增，False 表示已存在。"""
-    with db_lock, db_conn() as conn:
-        try:
-            conn.execute(
-                "INSERT INTO whitelist(user_id, added_at, remark) VALUES(?, ?, ?)",
-                (user_id, now_iso(), remark or None),
+
+def is_in_whitelist(user_id):
+    with db_conn() as db:
+        return (
+            db.execute("SELECT 1 FROM whitelist WHERE user_id=?", (user_id,)).fetchone()
+            is not None
+        )
+
+
+def get_whitelist():
+    with db_conn() as db:
+        return [
+            (r["user_id"], r["remark"] or "")
+            for r in db.execute("SELECT * FROM whitelist ORDER BY user_id")
+        ]
+
+
+def remember_app(app):
+    with db_conn() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO galaxy_apps(app_key,package,preference) VALUES(?,?,?)",
+            (app.key, app.package, app.region),
+        )
+    return app.key
+
+
+def get_app(key):
+    with db_conn() as db:
+        row = db.execute("SELECT * FROM galaxy_apps WHERE app_key=?", (key,)).fetchone()
+        return AppRequest(row["package"], row["preference"]) if row else None
+
+
+def add_subscription(chat_id, app):
+    remember_app(app)
+    with db_conn() as db:
+        return (
+            db.execute(
+                "INSERT OR IGNORE INTO galaxy_subscriptions(chat_id,app_key,created_at) VALUES(?,?,?)",
+                (chat_id, app.key, now_iso()),
+            ).rowcount
+            > 0
+        )
+
+
+def remove_subscription(chat_id, app):
+    with db_conn() as db:
+        return (
+            db.execute(
+                "DELETE FROM galaxy_subscriptions WHERE chat_id=? AND app_key=?",
+                (chat_id, app.key),
+            ).rowcount
+            > 0
+        )
+
+
+def remove_all_subscriptions(chat_id):
+    with db_conn() as db:
+        return db.execute(
+            "DELETE FROM galaxy_subscriptions WHERE chat_id=?", (chat_id,)
+        ).rowcount
+
+
+def get_subscriptions(chat_id=None):
+    sql = "SELECT a.*, s.chat_id, s.last_notified FROM galaxy_subscriptions s JOIN galaxy_apps a USING(app_key)"
+    with db_conn() as db:
+        return list(
+            db.execute(
+                sql
+                + (" WHERE s.chat_id=?" if chat_id is not None else "")
+                + " ORDER BY a.package,a.preference",
+                (chat_id,) if chat_id is not None else (),
             )
-            return True
-        except sqlite3.IntegrityError:
-            return False
+        )
 
 
-def remove_from_whitelist(user_id: int) -> bool:
-    """从白名单移除，返回 True 表示成功，False 表示不存在。"""
-    with db_lock, db_conn() as conn:
-        cur = conn.execute("DELETE FROM whitelist WHERE user_id = ?", (user_id,))
-        return cur.rowcount > 0
-
-
-def get_whitelist() -> list[tuple[int, str]]:
-    """返回白名单列表，每项为 (user_id, remark)。"""
-    with db_lock, db_conn() as conn:
-        rows = conn.execute(
-            "SELECT user_id, remark FROM whitelist ORDER BY added_at"
-        ).fetchall()
-        return [(r["user_id"], r["remark"] or "") for r in rows]
-
-
-def is_in_whitelist(user_id: int) -> bool:
-    with db_lock, db_conn() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM whitelist WHERE user_id = ?", (user_id,)
-        ).fetchone()
-        return row is not None
-
-
-# ---------------------------------------------------------------------------
-# 订阅
-# ---------------------------------------------------------------------------
-
-def add_subscription(chat_id: int, apk_url: str) -> bool:
-    """添加订阅，返回 True 表示新增，False 表示已存在。"""
-    apk_url = _normalize_apk_url(apk_url)
-    with db_lock, db_conn() as conn:
-        try:
-            conn.execute(
-                "INSERT INTO subscriptions(chat_id, apk_url, created_at) VALUES(?, ?, ?)",
-                (chat_id, apk_url, now_iso()),
+def subscribed_apps():
+    with db_conn() as db:
+        return [
+            AppRequest(r["package"], r["preference"])
+            for r in db.execute(
+                "SELECT DISTINCT a.package,a.preference FROM galaxy_apps a JOIN galaxy_subscriptions s USING(app_key)"
             )
-            return True
-        except sqlite3.IntegrityError:
-            return False
+        ]
 
 
-def remove_subscription(chat_id: int, apk_url: str) -> bool:
-    """取消指定订阅，返回 True 表示成功，False 表示不存在。"""
-    apk_url = _normalize_apk_url(apk_url)
-    with db_lock, db_conn() as conn:
-        cur = conn.execute(
-            "DELETE FROM subscriptions WHERE chat_id = ? AND apk_url = ?",
-            (chat_id, apk_url),
+def cache_release(app, release, notes):
+    remember_app(app)
+    with db_conn() as db:
+        db.execute(
+            "UPDATE galaxy_apps SET release_json=?,notes=?,checked_at=? WHERE app_key=?",
+            (
+                json.dumps(asdict(release), ensure_ascii=False),
+                notes,
+                now_iso(),
+                app.key,
+            ),
         )
-        return cur.rowcount > 0
 
 
-def remove_all_subscriptions(chat_id: int) -> int:
-    """取消该用户所有订阅，返回删除条数。"""
-    with db_lock, db_conn() as conn:
-        cur = conn.execute(
-            "DELETE FROM subscriptions WHERE chat_id = ?", (chat_id,)
+def pending_subscribers(app, release):
+    with db_conn() as db:
+        return [
+            r["chat_id"]
+            for r in db.execute(
+                "SELECT chat_id FROM galaxy_subscriptions WHERE app_key=? AND last_notified!=?",
+                (app.key, release.identity),
+            )
+        ]
+
+
+def mark_notified(chat_id, app, release):
+    with db_conn() as db:
+        db.execute(
+            "UPDATE galaxy_subscriptions SET last_notified=? WHERE chat_id=? AND app_key=?",
+            (release.identity, chat_id, app.key),
         )
-        return cur.rowcount
 
 
-def get_subscriptions(chat_id: int) -> list[str]:
-    """返回该用户的所有订阅 URL。"""
-    with db_lock, db_conn() as conn:
-        rows = conn.execute(
-            "SELECT apk_url FROM subscriptions WHERE chat_id = ? ORDER BY created_at",
-            (chat_id,),
-        ).fetchall()
-        return [r["apk_url"] for r in rows]
+def cached_release(row):
+    return Release(**json.loads(row["release_json"])) if row["release_json"] else None
 
 
-def get_all_subscribed_urls() -> list[str]:
-    """返回所有有订阅者的 URL（去重）。"""
-    with db_lock, db_conn() as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT apk_url FROM subscriptions ORDER BY apk_url"
-        ).fetchall()
-        return [r["apk_url"] for r in rows]
-
-
-def get_subscribers(apk_url: str) -> list[int]:
-    """返回订阅该 URL 的所有 chat_id。"""
-    with db_lock, db_conn() as conn:
-        rows = conn.execute(
-            "SELECT chat_id FROM subscriptions WHERE apk_url = ? ORDER BY created_at",
-            (apk_url,),
-        ).fetchall()
-        return [r["chat_id"] for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# APK 版本状态
-# ---------------------------------------------------------------------------
-
-def get_apk_version(apk_url: str) -> Optional[sqlite3.Row]:
-    with db_lock, db_conn() as conn:
-        return conn.execute(
-            "SELECT * FROM apk_versions WHERE apk_url = ?", (apk_url,)
-        ).fetchone()
-
-
-def update_apk_version(apk_url: str, **kwargs) -> None:
-    """UPSERT apk_versions 行，仅更新传入的字段。"""
-    if not kwargs:
-        return
-    kwargs["apk_url"] = apk_url
-    cols = list(kwargs.keys())
-    placeholders = ", ".join(f":{c}" for c in cols)
-    updates = ", ".join(
-        f"{c} = excluded.{c}" for c in cols if c != "apk_url"
-    )
-    sql = (
-        f"INSERT INTO apk_versions({', '.join(cols)}) VALUES({placeholders}) "
-        f"ON CONFLICT(apk_url) DO UPDATE SET {updates}"
-    )
-    with db_lock, db_conn() as conn:
-        conn.execute(sql, kwargs)
-
-
-def is_new_version(
-    apk_url: str,
-    variant_url: str,
-    version_code: Optional[int],
-    sha256: str,
-    variant_type: str,
-) -> bool:
-    """三级去重：variant_url / version_code / sha256 任一匹配则视为旧版本。
-
-    例外：同一 version_code 但旧记录是 BUNDLE 而新变体是 APK，视为更优更新。
-    """
-    row = get_apk_version(apk_url)
-    if row is None:
-        return True
-    if row["last_variant_url"] and row["last_variant_url"] == variant_url:
-        return False
-    if version_code is not None and row["last_version_code"] == version_code:
-        # BUNDLE 已推送，现在出了真正的 APK → 视为更优更新
-        if variant_type == "APK" and row["last_type"] == "BUNDLE":
-            return True
-        return False
-    if row["last_sha256"] and row["last_sha256"] == sha256:
-        return False
-    return True
+def legacy_count():
+    with db_conn() as db:
+        if not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='subscriptions'"
+        ).fetchone():
+            return 0
+        return db.execute("SELECT count(*) FROM subscriptions").fetchone()[0]

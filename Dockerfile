@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app
 
-RUN mkdir -p /data/downloads
+RUN mkdir -p /data
 VOLUME ["/data"]
 
 CMD ["python", "/app/main.py"]

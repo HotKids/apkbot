@@ -1,0 +1,28 @@
+# Replace with the HTTPS hostname used in PUBLIC_DOWNLOAD_BASE_URL.
+# Run Caddy on the Docker host; its ports 80/443 must be reachable.
+{
+	# Proxy error logs can include a URI even without access logging.
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>uri delete
+				request>headers>Referer delete
+				resp_headers>Location delete
+			}
+		}
+	}
+}
+
+dl.example.com {
+	# Access logging is deliberately not enabled: /d/ contains bearer tokens.
+	@apkdl path /d/* /healthz
+	handle @apkdl {
+		reverse_proxy 127.0.0.1:8080 {
+			transport http {
+				response_header_timeout 150s
+			}
+		}
+	}
+	respond 404
+}
