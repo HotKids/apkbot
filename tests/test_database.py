@@ -50,7 +50,16 @@ def test_subscriptions_distinguish_preference_and_never_create_version():
     assert db.remove_all_subscriptions(1) == 1
 
 
-def test_notification_identity_is_per_subscriber_region_product_and_code():
+def test_package_unsubscribe_covers_every_region_for_that_user_only():
+    for chat_id, region in ((1, "AUTO"), (1, "CN"), (2, "CN")):
+        db.add_subscription(chat_id, AppRequest("com.example.app", region))
+    db.add_subscription(1, AppRequest("com.other.app", "CN"))
+    assert db.remove_package_subscriptions(1, "com.example.app") == 2
+    assert [r["package"] for r in db.get_subscriptions(1)] == ["com.other.app"]
+    assert len(db.get_subscriptions(2)) == 1
+
+
+def test_notification_is_per_subscriber_and_only_for_a_higher_version_code():
     app = AppRequest("com.example.app")
     db.add_subscription(1, app)
     db.add_subscription(2, app)
@@ -58,9 +67,13 @@ def test_notification_identity_is_per_subscriber_region_product_and_code():
     db.cache_release(app, selected, "notes")
     db.mark_notified(1, app, selected)
     assert db.pending_subscribers(app, selected) == [2]
-    assert db.pending_subscribers(app, release(region="US")) == [1, 2]
-    assert db.pending_subscribers(app, release(product_id="99999")) == [1, 2]
+    # AUTO switching region or product for the same version is not an update.
+    assert db.pending_subscribers(app, release(region="US")) == [2]
+    assert db.pending_subscribers(app, release(product_id="99999")) == [2]
+    assert db.pending_subscribers(app, release(version_code=122)) == [2]
     assert db.pending_subscribers(app, release(version_code=124)) == [1, 2]
+    db.mark_notified(1, app, release(region="US", version_code=124))
+    assert db.pending_subscribers(app, release(version_code=123)) == [2]
     assert db.cached_release(db.get_subscriptions(1)[0]) == selected
     assert "downloadURI" not in db.get_subscriptions(1)[0]["release_json"]
 

@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
 import logging
@@ -52,10 +53,10 @@ def test_sub_persists_without_querying_or_claiming_delivery(monkeypatch, transpo
     app = AppRequest("com.example.app", "CN")
     assert db.pending_subscribers(app, release()) == [100]
     card = transport[1].send.call_args.args[1]
-    assert "尚未确认" in card.html()
+    assert "下次检查时会先推送当前版本" in card.html()
     assert db.get_subscriptions(100)[0]["release_json"] is None
     assert transport[1].send.call_args.args[2].to_dict()["inline_keyboard"] == [
-        [{"text": "获取下载链接", "callback_data": "gdl:" + app.key}]
+        [{"text": "🔗 获取下载链接", "callback_data": "gdl:" + app.key}]
     ]
 
 
@@ -66,7 +67,7 @@ def test_query_caches_app_name_and_date_for_subscription_and_list(
     store = fake_store(monkeypatch, selected)
     app = AppRequest(selected.package, "CN")
     handlers._link_once(100, app, 5)
-    assert "更新时间：2026-08-25" in transport[1].edit.call_args.args[2].html()
+    assert "更新日期：2026-08-25" in transport[1].edit.call_args.args[2].html()
     db.init_db()
     store.reset_mock()
     handlers.handle_sub(message())
@@ -203,7 +204,9 @@ def test_revoked_user_cannot_refresh_old_button(monkeypatch, transport):
         )
     )
     launch.assert_not_called()
-    transport[0].answer_callback_query.assert_called_once_with("revoked", "无权使用。")
+    transport[0].answer_callback_query.assert_called_once_with(
+        "revoked", "你没有使用权限。"
+    )
 
 
 def test_update_marks_only_confirmed_subscribers_and_never_downloads(
@@ -256,9 +259,10 @@ def test_link_delivery_never_fetches_apk_or_uploads_or_persists_url(
     keys = markup.to_dict()["inline_keyboard"]
     assert keys == [
         [
-            {"text": "下载", "url": SIGNED_URL},
-            {"text": "刷新", "callback_data": "gdl:" + app.key},
-        ]
+            {"text": "⬇️ 下载", "url": SIGNED_URL},
+            {"text": "🔄 刷新", "callback_data": "gdl:" + app.key},
+        ],
+        [{"text": "📋 复制文件名", "copy_text": {"text": "Example_01.02.3.apk"}}],
     ]
     assert "APK sent" not in card.html() and "SHA256" not in card.html()
     assert f"{size / 1_000_000:.2f} MB" in card.html()
@@ -287,7 +291,7 @@ def test_subscriber_buttons_fetch_links_on_demand(monkeypatch, transport):
     assert [call.args[0] for call in calls] == [100, 200]
     for call in calls:
         assert call.args[2].to_dict()["inline_keyboard"] == [
-            [{"text": "获取下载链接", "callback_data": "gdl:" + app.key}]
+            [{"text": "🔗 获取下载链接", "callback_data": "gdl:" + app.key}]
         ]
     store.authorize.assert_not_called()
 
@@ -333,7 +337,7 @@ def test_source_failure_sends_no_link_and_has_safe_diagnostics(
     handlers._link_once(100, AppRequest("com.example.app", "CN"), 5)
     transport[1].edit.assert_not_called()
     store.download.assert_not_called()
-    assert "获取链接失败" in transport[0].edit_message_text.call_args.args[0]
+    assert "获取下载链接失败" in transport[0].edit_message_text.call_args.args[0]
     assert "private-link" not in caplog.text + str(transport[0].mock_calls)
 
 
@@ -459,7 +463,7 @@ def test_refresh_failure_leaves_original_card_and_reports_via_callback(
     handlers._link_once(100, AppRequest("com.example.app", "CN"), 55, "refresh")
     transport[0].answer_callback_query.assert_called_once()
     text = transport[0].answer_callback_query.call_args.args[1]
-    assert "失败" in text or "未确认" in text
+    assert "失败" in text or "没有更新" in text
     assert "private-link" not in text + caplog.text
     transport[0].edit_message_text.assert_not_called()
     transport[0].send_message.assert_not_called()
@@ -483,6 +487,47 @@ def test_expired_callback_acknowledgement_does_not_undo_successful_edit(
     transport[1].edit.assert_called_once()
     transport[0].edit_message_text.assert_not_called()
     transport[0].send_message.assert_not_called()
+
+
+def test_refresh_failure_after_expired_callback_replies_under_card(
+    monkeypatch, transport, caplog
+):
+    store = fake_store(monkeypatch)
+    store.metadata.side_effect = ServiceError("商店暂时不可用。")
+    transport[0].answer_callback_query.side_effect = rejection(400, "query is too old")
+    handlers._link_once(100, AppRequest("com.example.app", "CN"), 55, "expired")
+    transport[0].send_message.assert_called_once()
+    chat_id, text = transport[0].send_message.call_args.args
+    reply = transport[0].send_message.call_args.kwargs["reply_parameters"]
+    assert chat_id == 100 and "失败" in text and reply.message_id == 55
+    transport[0].edit_message_text.assert_not_called()
+    transport[1].edit.assert_not_called()
+
+
+def test_unsub_without_region_removes_every_region_of_that_package(transport):
+    for region in ("AUTO", "CN", "US"):
+        db.add_subscription(100, AppRequest("com.example.app", region))
+    handlers.handle_unsub(message("/unsub com.example.app CN"))
+    assert transport[0].reply_to.call_args.args[1] == "已取消 1 个订阅。"
+    url = "https://galaxystore.samsung.com/detail/com.example.app?session_id=W_1"
+    handlers.handle_unsub(message("/unsub " + url))
+    assert transport[0].reply_to.call_args.args[1] == "已取消 2 个订阅。"
+    assert db.get_subscriptions(100) == []
+    handlers.handle_unsub(message("/unsub com.example.app"))
+    assert transport[0].reply_to.call_args.args[1].startswith("没有匹配的订阅")
+
+
+def test_whitelist_replies_name_the_user_and_the_outcome(transport):
+    replies = []
+    transport[0].reply_to.side_effect = lambda message, text: replies.append(text)
+    for text in ("/add 200 朋友", "/add 200", "/del 200", "/del 200"):
+        handlers.handle_users(message(text))
+    assert replies == [
+        "已将 200 加入白名单。",
+        "200 已在白名单中。",
+        "已将 200 移出白名单。",
+        "200 不在白名单中。",
+    ]
 
 
 def test_real_application_startup_and_shutdown_with_polling_stub(monkeypatch):
@@ -512,7 +557,10 @@ def test_real_application_startup_and_shutdown_with_polling_stub(monkeypatch):
     def polling(**kwargs):
         assert kwargs["allowed_updates"] == ["message", "callback_query"]
         assert schedulers[0].running
-        assert schedulers[0].get_job("galaxy_check") is not None
+        job = schedulers[0].get_job("galaxy_check")
+        # The first check follows startup instead of a full interval later.
+        delay = job.next_run_time - datetime.now(timezone.utc)
+        assert timedelta(seconds=30) < delay <= timedelta(minutes=1)
         assert db.get_subscriptions() == []
 
     monkeypatch.setattr(handlers.bot, "infinity_polling", polling)
@@ -553,7 +601,8 @@ def test_startup_rejects_unavailable_api_or_existing_webhook(
 
 
 def test_sigterm_stops_polling_and_restores_signal_handler(monkeypatch):
-    import main, signal
+    import main
+    import signal
 
     previous = signal.getsignal(signal.SIGTERM)
     monkeypatch.setattr(handlers.bot, "get_me", Mock(return_value=NS(id=123456)))
@@ -584,7 +633,7 @@ def test_subscription_get_link_turns_same_card_into_download_and_refresh(
     store.authorize.assert_not_called()
     original_keys = transport[1].send.call_args.args[2].to_dict()["inline_keyboard"]
     assert original_keys == [
-        [{"text": "获取下载链接", "callback_data": "gdl:" + app.key}]
+        [{"text": "🔗 获取下载链接", "callback_data": "gdl:" + app.key}]
     ]
     transport[1].send.reset_mock()
 
@@ -610,8 +659,8 @@ def test_subscription_get_link_turns_same_card_into_download_and_refresh(
     assert transport[1].edit.call_args.args[:2] == (100, 55)
     buttons = transport[1].edit.call_args.args[3].to_dict()["inline_keyboard"][0]
     assert buttons == [
-        {"text": "下载", "url": SIGNED_URL},
-        {"text": "刷新", "callback_data": "gdl:" + app.key},
+        {"text": "⬇️ 下载", "url": SIGNED_URL},
+        {"text": "🔄 刷新", "callback_data": "gdl:" + app.key},
     ]
     transport[1].send.assert_not_called()
     transport[0].send_message.assert_not_called()

@@ -1,5 +1,7 @@
+from datetime import datetime, timedelta
 import logging
 import signal
+from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 import config
 
@@ -21,7 +23,9 @@ def main():
     except Exception:
         raise RuntimeError("Telegram 启动检查失败，请检查 Bot Token 和网络。") from None
     if webhook.url:
-        raise RuntimeError("此 Bot 仍配置了 webhook，请先切换到轮询模式。")
+        raise RuntimeError(
+            "此 Bot 设置了 webhook，请先调用 deleteWebhook 删除后再启动。"
+        )
     init_db()
     scheduler = BackgroundScheduler(timezone=config.TZ)
     scheduler.add_job(
@@ -31,6 +35,9 @@ def main():
         id="galaxy_check",
         max_instances=1,
         coalesce=True,
+        # A plain interval would restart its countdown on every deploy, so
+        # frequent rebuilds could postpone checks indefinitely.
+        next_run_time=datetime.now(ZoneInfo(config.TZ)) + timedelta(minutes=1),
     )
     scheduler.start()
     previous_sigterm = signal.signal(signal.SIGTERM, lambda *_: bot.stop_polling())

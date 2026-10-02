@@ -125,6 +125,15 @@ def remove_subscription(chat_id, app):
         )
 
 
+def remove_package_subscriptions(chat_id, package):
+    with db_conn() as db:
+        return db.execute(
+            "DELETE FROM galaxy_subscriptions WHERE chat_id=? AND app_key IN "
+            "(SELECT app_key FROM galaxy_apps WHERE package=?)",
+            (chat_id, package),
+        ).rowcount
+
+
 def remove_all_subscriptions(chat_id):
     with db_conn() as db:
         return db.execute(
@@ -169,14 +178,23 @@ def cache_release(app, release, notes):
         )
 
 
+def notified_code(identity):
+    # last_notified holds Release.identity (region:product:versionCode) or ''.
+    code = identity.rpartition(":")[2]
+    return int(code) if code.isascii() and code.isdecimal() else 0
+
+
 def pending_subscribers(app, release):
+    # Only a higher versionCode is an update. AUTO may answer from US one day
+    # and CN the next for the same version, and a rollback is not news.
     with db_conn() as db:
         return [
             r["chat_id"]
             for r in db.execute(
-                "SELECT chat_id FROM galaxy_subscriptions WHERE app_key=? AND last_notified!=?",
-                (app.key, release.identity),
+                "SELECT chat_id,last_notified FROM galaxy_subscriptions WHERE app_key=?",
+                (app.key,),
             )
+            if notified_code(r["last_notified"]) < release.version_code
         ]
 
 
