@@ -1,4 +1,6 @@
 import sqlite3
+import json
+from dataclasses import asdict
 import database as db
 from galaxy_store import AppRequest
 from tests.test_galaxy_store import release
@@ -70,3 +72,18 @@ def test_resubscription_resets_notification_only_for_that_user():
     db.remove_subscription(1, app)
     db.add_subscription(1, app)
     assert db.pending_subscribers(app, release()) == [1]
+
+
+def test_legacy_cache_without_update_date_still_loads():
+    values = asdict(release())
+    del values["updated_date"]
+    assert db.cached_release({"release_json": json.dumps(values)}) == release()
+
+
+def test_latest_name_is_shared_across_region_preferences(monkeypatch):
+    times = iter(["2026-10-02T01:00:00+00:00", "2026-10-02T02:00:00+00:00"])
+    monkeypatch.setattr(db, "now_iso", lambda: next(times))
+    db.cache_release(AppRequest("com.example.app", "US"), release(name="Example"), None)
+    db.cache_release(AppRequest("com.example.app", "CN"), release(name="应用"), None)
+    assert db.last_app_name("com.example.app") == "应用"
+    assert db.last_app_name("com.other.app") is None

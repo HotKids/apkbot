@@ -81,7 +81,8 @@ def _link_once(chat_id, app, progress_id, callback_id=None):
         with GalaxyStore() as store:
             grant = store.download_link(app)
             release = grant.release
-            notes = store.notes(release)
+            release, notes = store.details(release)
+        db.cache_release(app, release, notes)
         markup = keyboard(app, grant.url)
         card = release_card(release, notes)
     except StoreError as exc:
@@ -134,7 +135,7 @@ def check_app(app):
     # Scheduled checks never request downloadForRestore (2316) or APK bytes.
     with GalaxyStore() as store:
         release = store.metadata(app)
-        notes = store.notes(release)
+        release, notes = store.details(release)
     db.cache_release(app, release, notes)
     for chat_id in db.pending_subscribers(app, release):
         if not allowed_user(chat_id):
@@ -198,7 +199,7 @@ def handle_sub(message):
         added = db.add_subscription(message.chat.id, app)
         messages.send(
             message.chat.id,
-            subscription_card(app, added),
+            subscription_card(app, added, db.last_app_name(app.package)),
             keyboard(app),
         )
 
@@ -242,13 +243,15 @@ def send_cached(chat_id, all_users=False):
         lines = []
         for row in rows[offset : offset + 6]:
             release = db.cached_release(row)
+            name = db.last_app_name(row["package"])
             version = (
                 f"{release.version_name[:100]} · {region_label(release.region)}"
                 if release
                 else "尚未查询"
             )
             lines.append(
-                f"{row['package']} · {region_label(row['preference'])} — {version}"
+                (f"{name[:100]}\n" if name else "")
+                + f"{row['package']} · {region_label(row['preference'])} — {version}"
                 + (f" · 用户 {row['chat_id']}" if all_users else "")
             )
         messages.send(

@@ -33,7 +33,7 @@ def fake_store(monkeypatch, selected=None):
 
     store = Mock()
     store.metadata.return_value = selected or release()
-    store.notes.return_value = "notes"
+    store.details.side_effect = lambda selected: (selected, "notes")
     store.authorize.return_value = DownloadGrant(
         store.metadata.return_value, SIGNED_URL, store.metadata.return_value.size or 42
     )
@@ -57,6 +57,26 @@ def test_sub_persists_without_querying_or_claiming_delivery(monkeypatch, transpo
     assert transport[1].send.call_args.args[2].to_dict()["inline_keyboard"] == [
         [{"text": "获取下载链接", "callback_data": "gdl:" + app.key}]
     ]
+
+
+def test_query_caches_app_name_and_date_for_subscription_and_list(
+    monkeypatch, transport
+):
+    selected = release(name="三星生活助手", updated_date="2026-08-25")
+    store = fake_store(monkeypatch, selected)
+    app = AppRequest(selected.package, "CN")
+    handlers._link_once(100, app, 5)
+    assert "更新时间：2026-08-25" in transport[1].edit.call_args.args[2].html()
+    db.init_db()
+    store.reset_mock()
+    handlers.handle_sub(message())
+    assert transport[1].send.call_args.args[1].title == "三星生活助手 · 订阅"
+    assert db.cached_release(db.get_subscriptions(100)[0]) == selected
+    assert db.pending_subscribers(app, selected) == [100]
+    handlers.handle_list(message("/list"))
+    assert "三星生活助手" in transport[1].send.call_args.args[1].html()
+    store.metadata.assert_not_called()
+    store.details.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -228,7 +248,7 @@ def test_link_delivery_never_fetches_apk_or_uploads_or_persists_url(
         "download_link",
         "metadata",
         "authorize",
-        "notes",
+        "details",
     ]
     store.download.assert_not_called()
     transport[0].send_document.assert_not_called()

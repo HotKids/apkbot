@@ -39,9 +39,10 @@ def main():
                 release = grant.release
             else:
                 release = store.metadata(app)
-            result = {"metadata": asdict(release)}
+            result = {}
             if args.notes:
-                result["cn_notes"] = store.notes(release)
+                release, result["cn_notes"] = store.details(release)
+            result["metadata"] = asdict(release)
             if args.authorize:
                 result["authorization"] = dict(
                     host=urlsplit(grant.url).hostname,

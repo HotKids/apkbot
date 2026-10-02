@@ -60,6 +60,7 @@ def release_card(release, notes=None, *, update=False):
         highlight=f"版本：{short(release.version_name, 100)}",
         paragraphs=(
             f"版本代码：{release.version_code}",
+            f"更新时间：{release.updated_date or '暂无数据'}",
             f"{region_label(release.region)} · {size}",
             f"包名：{release.package}",
         ),
@@ -68,9 +69,9 @@ def release_card(release, notes=None, *, update=False):
     )
 
 
-def subscription_card(app, added):
+def subscription_card(app, added, name=None):
     return Card(
-        "APKDL · 订阅",
+        f"{short(name, 100) if name else 'APKDL'} · 订阅",
         (
             "已保存订阅。" if added else "此订阅已存在。",
             f"{app.package} · {region_label(app.region)}",

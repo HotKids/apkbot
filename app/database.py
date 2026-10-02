@@ -192,6 +192,16 @@ def cached_release(row):
     return Release(**json.loads(row["release_json"])) if row["release_json"] else None
 
 
+def last_app_name(package):
+    with db_conn() as db:
+        row = db.execute(
+            "SELECT release_json FROM galaxy_apps WHERE package=? AND release_json IS NOT NULL "
+            "ORDER BY checked_at DESC, rowid DESC LIMIT 1",
+            (package,),
+        ).fetchone()
+    return cached_release(row).name if row else None
+
+
 def legacy_count():
     with db_conn() as db:
         if not db.execute(

@@ -18,7 +18,7 @@ from galaxy_store import (
     StoreError,
     TransportError,
     VersionDrift,
-    match_cn_notes,
+    match_cn_details,
     parse_ods_grant,
     parse_ods_metadata,
     parse_stub,
@@ -126,7 +126,7 @@ def request_bytes(session, method, url, **kwargs):
         return b"".join(chunks(response, deadline=deadline, limit=METADATA_LIMIT))
 
 
-def notes_from_response(data, release):
+def details_from_response(data, release):
     def unique_object(pairs):
         result = {}
         for key, value in pairs:
@@ -137,9 +137,9 @@ def notes_from_response(data, release):
 
     try:
         response = json.loads(data, object_pairs_hook=unique_object)
-        return match_cn_notes(response, release)
+        return match_cn_details(response, release)
     except (ValueError, UnicodeError, RecursionError):
-        return None
+        return release, None
 
 
 class GalaxyStore:
@@ -221,7 +221,7 @@ class GalaxyStore:
         validate_url(grant.url)
         return grant
 
-    def notes(self, release):
+    def details(self, release):
         try:
             data = request_bytes(
                 self.session,
@@ -231,6 +231,6 @@ class GalaxyStore:
                 + "?cntyCd=CHN",
                 headers={"Accept-Language": "zh-CN"},
             )
-            return notes_from_response(data, release)
+            return details_from_response(data, release)
         except (StoreError, UnicodeError, ValueError):
-            return None
+            return release, None

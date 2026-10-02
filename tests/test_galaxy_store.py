@@ -13,7 +13,7 @@ from galaxy_store import (
     ServiceError,
     StubRestricted,
     VersionDrift,
-    match_cn_notes,
+    match_cn_details,
     parse_input,
     parse_ods_grant,
     parse_ods_metadata,
@@ -256,20 +256,59 @@ def test_ods_profile_reuses_only_synthetic_identity_and_correct_guid_case():
     assert auth.find("request").attrib["id"] == "2316"
 
 
-def test_cn_notes_exact_match_never_changes_apk_region():
+def test_cn_details_exact_match_never_changes_apk_region():
     chosen = release(region="US", product_id="99999")
     detail = dict(
         countryCode="CHN",
         contentBinaryVersion="01.02.3",
         contentNewDescription=" 更新 ",
+        modifyDate="2026.08.25.",
     )
 
     def response(**changes):
         return dict(appId=chosen.package, DetailMain=dict(detail, **changes))
 
-    assert match_cn_notes(response(), chosen) == "更新"
-    assert match_cn_notes(response(contentBinaryVersion="1.2.3"), chosen) is None
-    assert match_cn_notes(response(countryCode="USA"), chosen) is None
-    assert match_cn_notes(dict(response(), appId="com.other.app"), chosen) is None
-    assert match_cn_notes(response(contentNewDescription="  "), chosen) is None
+    assert match_cn_details(response(), chosen) == (chosen, "更新")
+    assert match_cn_details(response(contentBinaryVersion="1.2.3"), chosen) == (
+        chosen,
+        None,
+    )
+    assert match_cn_details(response(countryCode="USA"), chosen) == (chosen, None)
+    assert match_cn_details(dict(response(), appId="com.other.app"), chosen) == (
+        chosen,
+        None,
+    )
+    assert match_cn_details(response(contentNewDescription="  "), chosen) == (
+        chosen,
+        None,
+    )
     assert chosen.region == "US"
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("2026.08.25.", "2026-08-25"),
+        ("2026.02.30.", None),
+        (None, None),
+        (1790936758, None),
+    ],
+)
+def test_store_update_date_is_optional_and_does_not_change_release_identity(
+    value, expected
+):
+    original = release()
+    response = dict(
+        appId=original.package,
+        DetailMain=dict(
+            countryCode="CHN",
+            contentBinaryVersion=original.version_name,
+            modifyDate=value,
+        ),
+    )
+    enriched, notes = match_cn_details(response, original)
+    assert enriched.updated_date == expected
+    assert enriched.identity == original.identity
+    assert notes is None
+    response["DetailMain"]["contentBinaryVersion"] = "other"
+    assert match_cn_details(response, original) == (original, None)

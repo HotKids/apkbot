@@ -219,17 +219,23 @@ def test_login_and_installability_block_authorization(monkeypatch):
     post.assert_not_called()
 
 
-def test_notes_json_binding_and_ambiguity():
+def test_details_json_binding_and_ambiguity():
     detail = dict(
         countryCode="CHN", contentBinaryVersion="01.02.3", contentNewDescription="fixed"
     )
     doc = json.dumps(dict(appId="com.example.app", DetailMain=detail)).encode()
-    assert scraper.notes_from_response(doc, release()) == "fixed"
-    assert (
-        scraper.notes_from_response(
-            b'{"appId":"com.example.app","appId":"other"}', release()
-        )
-        is None
+    assert scraper.details_from_response(doc, release()) == (release(), "fixed")
+    assert scraper.details_from_response(
+        b'{"appId":"com.example.app","appId":"other"}', release()
+    ) == (release(), None)
+    other = release(version_name="1.2.3")
+    assert scraper.details_from_response(doc, other) == (other, None)
+    assert scraper.details_from_response(b"<html>failure</html>", release()) == (
+        release(),
+        None,
     )
-    assert scraper.notes_from_response(doc, release(version_name="1.2.3")) is None
-    assert scraper.notes_from_response(b"<html>failure</html>", release()) is None
+
+
+def test_website_unavailable_keeps_download_metadata():
+    store = scraper.GalaxyStore(session(Response(b"Unavailable", status=503)))
+    assert store.details(release()) == (release(), None)

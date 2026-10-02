@@ -1,6 +1,6 @@
 """Galaxy Store protocol and identity rules; no I/O or Telegram dependencies."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from hashlib import sha256
 import re
@@ -114,6 +114,7 @@ class Release:
     channel: str = "ods"
     needs_login: bool = False
     installable: bool = True
+    updated_date: str | None = None
 
     @property
     def identity(self):
@@ -355,18 +356,28 @@ class OdsProfile:
         )
 
 
-def match_cn_notes(response, release):
-    """Only exact CN package/versionName binding. Never infer a VersionCode."""
+def match_cn_details(response, release):
+    """Bind CN website details to the exact package/version; dates stay in CN."""
     if not isinstance(response, dict):
-        return None
+        return release, None
     detail = response.get("DetailMain")
     if not isinstance(detail, dict):
-        return None
+        return release, None
     if (
         response.get("appId") != release.package
         or detail.get("countryCode") != "CHN"
         or detail.get("contentBinaryVersion") != release.version_name
     ):
-        return None
+        return release, None
+    # modifyDate is the store's update date, not our query or link expiry time.
+    # A CN date must not be presented as the US release's update date.
+    value = detail.get("modifyDate")
+    if release.region == "CN" and isinstance(value, str):
+        try:
+            updated_date = datetime.strptime(value.strip(), "%Y.%m.%d.").date()
+        except ValueError:
+            pass
+        else:
+            release = replace(release, updated_date=updated_date.isoformat())
     notes = detail.get("contentNewDescription")
-    return notes.strip() if isinstance(notes, str) and notes.strip() else None
+    return release, notes.strip() if isinstance(notes, str) and notes.strip() else None
