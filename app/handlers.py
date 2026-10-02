@@ -25,7 +25,7 @@ from cards import (
     short,
     subscription_card,
 )
-from galaxy_store import InvalidInput, StoreError, parse_input
+from galaxy_store import USAGE, InvalidInput, StoreError, parse_input
 from richmsg import RichMessenger
 from scraper import GalaxyStore
 from telegram_transport import install_transport
@@ -60,17 +60,17 @@ def keyboard(app, url=None, filename=None):
     markup = InlineKeyboardMarkup()
     buttons = []
     if url:
-        buttons.append(InlineKeyboardButton("下载", url=url))
+        buttons.append(InlineKeyboardButton("⬇️ 下载", url=url))
     buttons.append(
         InlineKeyboardButton(
-            "刷新" if url else "获取下载链接", callback_data="gdl:" + app.key
+            "🔄 刷新" if url else "🔗 获取下载链接", callback_data="gdl:" + app.key
         )
     )
     markup.row(*buttons)
     if filename:
         # Samsung's CDN fixes the saved name; this copies "应用名_版本号.apk".
         markup.row(
-            InlineKeyboardButton("复制文件名", copy_text=CopyTextButton(filename))
+            InlineKeyboardButton("📋 复制文件名", copy_text=CopyTextButton(filename))
         )
     return markup
 
@@ -123,10 +123,10 @@ def _link_once(chat_id, app, progress_id, callback_id=None):
         markup = keyboard(app, grant.url, apk_filename(release))
         card = release_card(release, notes)
     except StoreError as exc:
-        report("获取链接失败：" + str(exc))
+        report("获取下载链接失败：" + str(exc))
         return
     except Exception:
-        report("获取链接失败，请稍后重试。")
+        report("获取下载链接失败，请稍后重试。")
         logger.error(
             "Link preparation failed; diagnostic details suppressed to protect transient URLs"
         )
@@ -136,21 +136,23 @@ def _link_once(chat_id, app, progress_id, callback_id=None):
         messages.edit(chat_id, progress_id, card, markup)
     except Exception:
         if callback_id:
-            answer_link_callback(callback_id, "更新未确认，请查看原卡片后再试。")
+            answer_link_callback(
+                callback_id, "卡片可能没有更新，请查看后再点「刷新」。"
+            )
         # An edit timeout may have succeeded. Do not overwrite the same card
         # with an error message, retry the edit, or send a duplicate.
         logger.warning("Link edit unconfirmed; original message left in place")
     else:
         if callback_id:
-            answer_link_callback(callback_id, "链接已更新，请点「下载」。")
+            answer_link_callback(callback_id, "已获取新链接，请点「下载」。")
 
 
 def start_link(chat_id, app, message_id=None, callback_id=None):
     if not _link_slots.acquire(blocking=False):
         if callback_id:
-            answer_link_callback(callback_id, "已有两个链接请求，请稍后再试。")
+            answer_link_callback(callback_id, "正在处理其他请求，请稍后再试。")
         else:
-            bot.send_message(chat_id, "已有两个链接请求，请稍后再试。")
+            bot.send_message(chat_id, "正在处理其他请求，请稍后再试。")
         return
     try:
         if message_id is None:
@@ -192,7 +194,7 @@ def check_app(app):
 def run_check_all(triggered_by=None):
     if not check_lock.acquire(blocking=False):
         if triggered_by:
-            bot.send_message(triggered_by, "已有检查任务正在运行。")
+            bot.send_message(triggered_by, "已有检查正在进行，请稍后再试。")
         return
     succeeded = failed = 0
     try:
@@ -206,7 +208,7 @@ def run_check_all(triggered_by=None):
         if triggered_by:
             bot.send_message(
                 triggered_by,
-                f"检查完成：{succeeded} 项查询成功，{failed} 项失败。通知按送达结果单独记录。",
+                f"检查完成：{succeeded} 个应用查询成功，{failed} 个失败。有新版本的订阅已单独通知。",
             )
     finally:
         check_lock.release()
@@ -215,7 +217,7 @@ def run_check_all(triggered_by=None):
 def argument(message):
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) != 2:
-        raise InvalidInput("请输入包名或 Galaxy Store 详情链接，可追加 CN 或 US。")
+        raise InvalidInput(USAGE)
     return parts[1]
 
 
@@ -265,10 +267,15 @@ def handle_unsub(message):
             )
         else:
             count = int(db.remove_subscription(message.chat.id, parse_input(text)))
-        bot.reply_to(message, f"已取消 {count} 个订阅。")
+        bot.reply_to(
+            message,
+            f"已取消 {count} 个订阅。"
+            if count
+            else "没有匹配的订阅，可用 /list 查看。",
+        )
     except InvalidInput:
         bot.reply_to(
-            message, "用法：/unsub &lt;包名或详情链接&gt; [CN|US]，或 /unsub all"
+            message, "用法：/unsub &lt;包名或链接&gt; [CN|US]；取消全部用 /unsub all"
         )
 
 
@@ -276,7 +283,8 @@ def send_cached(chat_id, all_users=False):
     rows = db.get_subscriptions(None if all_users else chat_id)
     title = "APKDL · 订阅状态" if all_users else "APKDL · 我的订阅"
     if not rows:
-        messages.send(chat_id, Card(title, ("当前无订阅。",)))
+        empty = "暂无任何订阅。" if all_users else "还没有订阅，发送 /sub <包名> 添加。"
+        messages.send(chat_id, Card(title, (empty,)))
         return
     # Bound each card to fit ordinary HTML fallback as well as rich messages.
     for offset in range(0, len(rows), 6):
@@ -287,7 +295,7 @@ def send_cached(chat_id, all_users=False):
             version = (
                 f"版本 {short(release.version_name, 100)} · {region_label(release.region)}"
                 if release
-                else "尚未查询"
+                else "版本待检查"
             )
             lines.append(
                 ((bold(short(name, 100)), "\n") if name else ())
@@ -302,7 +310,7 @@ def send_cached(chat_id, all_users=False):
             Card(
                 f"{title} · {len(rows)} 项",
                 tuple(lines),
-                footer="缓存数据，不代表实时可用性。",
+                footer="版本为上次检查的结果，不是实时数据。",
             ),
         )
 
@@ -320,13 +328,17 @@ def handle_status(message):
     send_cached(message.chat.id, all_users=True)
     count = db.legacy_count()
     if count:
-        bot.reply_to(message, f"另保留 {count} 条旧来源订阅，均未启用。")
+        bot.reply_to(
+            message, f"另有 {count} 条旧版来源的订阅已停用，仅保留在数据库中。"
+        )
 
 
 @bot.message_handler(commands=["app"])
 def handle_app(message):
     if allowed(message):
-        bot.reply_to(message, "旧版搜索已停用。请发送包名或 Galaxy Store 详情链接。")
+        bot.reply_to(
+            message, "关键词搜索已停用，请直接发送包名或 Galaxy Store 详情链接。"
+        )
 
 
 @bot.message_handler(commands=["help"])
@@ -354,17 +366,20 @@ def handle_users(message):
         or not parts[1].isdigit()
         or not 0 < int(parts[1]) < 2**63
     ):
-        bot.reply_to(
-            message, "用法：/add &lt;user_id&gt; [备注] 或 /del &lt;user_id&gt;"
-        )
+        bot.reply_to(message, "用法：/add &lt;用户ID&gt; [备注] 或 /del &lt;用户ID&gt;")
         return
+    user_id = int(parts[1])
     if parts[0].split("@")[0] == "/add":
-        changed = db.add_to_whitelist(
-            int(parts[1]), parts[2][:200] if len(parts) > 2 else ""
+        changed = db.add_to_whitelist(user_id, parts[2][:200] if len(parts) > 2 else "")
+        text = (
+            f"已将 {user_id} 加入白名单。" if changed else f"{user_id} 已在白名单中。"
         )
     else:
-        changed = db.remove_from_whitelist(int(parts[1]))
-    bot.reply_to(message, "白名单已更新。" if changed else "白名单未改变。")
+        changed = db.remove_from_whitelist(user_id)
+        text = (
+            f"已将 {user_id} 移出白名单。" if changed else f"{user_id} 不在白名单中。"
+        )
+    bot.reply_to(message, text)
 
 
 @bot.message_handler(commands=["user"])
@@ -391,11 +406,11 @@ def handle_link_callback(call):
         and call.message.chat.id == call.from_user.id
         and allowed_user(call.from_user.id)
     ):
-        bot.answer_callback_query(call.id, "无权使用。")
+        bot.answer_callback_query(call.id, "你没有使用权限。")
         return
     app = db.get_app(call.data[4:])
     if not app:
-        bot.answer_callback_query(call.id, "此应用记录不存在，请重新输入包名。")
+        bot.answer_callback_query(call.id, "找不到这条应用记录，请重新发送包名。")
         return
     start_link(
         call.message.chat.id,
@@ -414,7 +429,7 @@ def handle_link_callback(call):
     )
 )
 def handle_legacy_callback(call):
-    bot.answer_callback_query(call.id, "旧来源已停用，请使用 Galaxy Store 包名。")
+    bot.answer_callback_query(call.id, "这个按钮来自已停用的旧版本，请重新发送包名。")
 
 
 @bot.message_handler(

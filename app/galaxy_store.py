@@ -54,6 +54,7 @@ class VersionDrift(DownloadError):
     pass
 
 
+USAGE = "请发送包名或 Galaxy Store 详情链接，可在后面加地区 CN 或 US，例如：com.lucky.luckyclient CN"
 PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+")
 # Samsung lists some of its own US builds under release labels such as
 # "[260921] GALAXY Store 9CR Update -  US" (stub and US web page alike).
@@ -71,9 +72,7 @@ class AppRequest:
             or not PACKAGE.fullmatch(self.package)
             or self.region not in {"AUTO", "US", "CN"}
         ):
-            raise InvalidInput(
-                "请输入有效包名或 Galaxy Store 详情链接，可追加 CN 或 US。"
-            )
+            raise InvalidInput(USAGE)
 
     @property
     def key(self):
@@ -83,13 +82,15 @@ class AppRequest:
 def parse_input(text):
     parts = text.split()
     if not 1 <= len(parts) <= 2:
-        raise InvalidInput("用法：包名或 Galaxy Store 详情链接 [CN|US]")
+        raise InvalidInput(USAGE)
     value = parts[0]
     if ":" in value or "/" in value:
         try:
             u = urlsplit(value)
         except ValueError:
-            raise InvalidInput("Galaxy Store 详情链接不合法。") from None
+            raise InvalidInput(
+                "无法识别这个链接，请发送 Galaxy Store 应用详情页链接。"
+            ) from None
         # Share links append ?session_id=…; only the path names the package.
         if (
             u.scheme != "https"
@@ -97,7 +98,10 @@ def parse_input(text):
             or not u.path.startswith("/detail/")
             or u.path.count("/") != 2
         ):
-            raise InvalidInput("仅接受 https://galaxystore.samsung.com/detail/<包名>。")
+            raise InvalidInput(
+                "只支持 Galaxy Store 应用详情页链接："
+                "https://galaxystore.samsung.com/detail/<包名>"
+            )
         value = u.path[len("/detail/") :]
     return AppRequest(value, parts[1].upper() if len(parts) == 2 else "AUTO")
 
@@ -130,26 +134,26 @@ class DownloadGrant:
 
 def xml_fields(data: bytes, root_name: str):
     if not data or len(data) > 2_000_000:
-        raise InvalidResponse("商店 XML 为空或过大。")
+        raise InvalidResponse("商店数据异常（响应为空或过大），请稍后重试。")
     try:
         root = fromstring(
             data, forbid_dtd=True, forbid_entities=True, forbid_external=True
         )
     except (ET.ParseError, DefusedXmlException, ValueError):
-        raise InvalidResponse("商店 XML 格式不合法。") from None
+        raise InvalidResponse("商店数据异常（无法解析），请稍后重试。") from None
     if root.tag != root_name:
-        raise InvalidResponse("商店 XML 根元素不匹配。")
+        raise InvalidResponse("商店数据异常（结构不符），请稍后重试。")
     fields = {}
     for node in root.iter():
         if len(node):
             continue
         key = node.attrib.get("name", node.tag)
         if key in fields:
-            raise InvalidResponse("商店 XML 含有重复字段。")
+            raise InvalidResponse("商店数据异常（字段重复），请稍后重试。")
         fields[key] = (node.text or "").strip()
         if key == "errorString" and "errorCode" in node.attrib:
             if "errorCode" in fields:
-                raise InvalidResponse("商店 XML 含有重复错误码。")
+                raise InvalidResponse("商店数据异常（错误码重复），请稍后重试。")
             fields["errorCode"] = node.attrib["errorCode"]
     return fields
 
@@ -157,23 +161,23 @@ def xml_fields(data: bytes, root_name: str):
 def required(fields, key):
     value = fields.get(key, "")
     if not value:
-        raise InvalidResponse(f"商店响应缺少 {key}。")
+        raise InvalidResponse(f"商店数据异常（缺少 {key}），请稍后重试。")
     return value
 
 
 def positive(fields, key):
     raw = required(fields, key)
     if not raw.isascii() or not raw.isdecimal() or len(raw) > 19 or int(raw) <= 0:
-        raise InvalidResponse(f"商店响应的 {key} 不合法。")
+        raise InvalidResponse(f"商店数据异常（{key} 无效），请稍后重试。")
     return int(raw)
 
 
 def _identity(fields, package, guid_key, product_key):
     if required(fields, guid_key) != package:
-        raise InvalidResponse("商店响应包名不匹配。")
+        raise InvalidResponse("商店数据异常（包名不符），请稍后重试。")
     product = required(fields, product_key)
     if not re.fullmatch(r"[0-9]{1,30}", product):
-        raise InvalidResponse("商店响应的产品 ID 不合法。")
+        raise InvalidResponse("商店数据异常（产品 ID 无效），请稍后重试。")
     return product
 
 
@@ -185,13 +189,15 @@ def check_stub_status(fields):
         "application is not approved as stub",
         "application is not allowed to use stubdownload",
     }:
-        raise StubRestricted("该应用不允许使用 stub 通道；这不代表商店没有 APK。")
+        raise StubRestricted(
+            "US 商店不提供此应用的匿名下载，这不代表应用不存在；可改用 CN 再试。"
+        )
     # Device/carrier/profile mismatch and unknown responses are not absence.
     if message == "application is not available in this country":
-        raise NoAvailableVersion("该应用在请求的地区不可用。")
+        raise NoAvailableVersion("此应用在所选地区不可用，可换个地区再试。")
     if "login" in message or "log in" in message:
-        raise LoginRequired("商店要求登录，不能匿名下载。")
-    raise ServiceError("stub 查询失败，无法确认地区可用性。")
+        raise LoginRequired("此应用需要登录 Samsung 账号才能下载，bot 无法匿名获取。")
+    raise ServiceError("US 商店没有返回可用结果，可改用 CN 或稍后再试。")
 
 
 def parse_stub(data, package, region):
@@ -216,8 +222,10 @@ def check_ods_status(fields):
     code = required(fields, "errorCode")
     if code != "0" or status.casefold() not in {"", "success"}:
         if "login" in status.casefold() or "log in" in status.casefold():
-            raise LoginRequired("商店要求登录，不能匿名下载。")
-        raise ServiceError("ODS 服务拒绝请求；不能据此认定应用不存在。")
+            raise LoginRequired(
+                "此应用需要登录 Samsung 账号才能下载，bot 无法匿名获取。"
+            )
+        raise ServiceError("CN 商店拒绝了请求，这不代表应用不存在；请稍后重试。")
 
 
 def parse_ods_metadata(data, package):
@@ -227,7 +235,7 @@ def parse_ods_metadata(data, package):
     login = required(fields, "needToLogin")
     installable = required(fields, "installableYN")
     if login not in {"0", "1"} or installable not in {"Y", "N"}:
-        raise InvalidResponse("商店登录或安装状态不合法。")
+        raise InvalidResponse("商店数据异常（登录或安装状态无效），请稍后重试。")
     return Release(
         package,
         "CN",
@@ -247,21 +255,21 @@ def parse_ods_grant(data, release):
     fields = xml_fields(data, "SamsungProtocol")
     check_ods_status(fields)
     if required(fields, "productID") != release.product_id:
-        raise InvalidResponse("下载授权的产品 ID 不匹配。")
+        raise InvalidResponse("商店数据异常（下载授权的产品 ID 不符），请稍后重试。")
     if "GUID" in fields and fields["GUID"] != release.package:
-        raise InvalidResponse("下载授权的包名不匹配。")
+        raise InvalidResponse("商店数据异常（下载授权的包名不符），请稍后重试。")
     # binaryArch describes CPU coverage (e.g. 32n64), not full vs. delta APKs.
     # Use the full download's downLoadURI and contentsSize below.
     if "version" in fields and fields["version"] != release.version_name:
-        raise VersionDrift("商店版本已改变，请重新查询后下载。")
+        raise VersionDrift("商店版本刚刚更新，请再试一次。")
     if (
         "versionCode" in fields
         and positive(fields, "versionCode") != release.version_code
     ):
-        raise VersionDrift("商店版本已改变，请重新查询后下载。")
+        raise VersionDrift("商店版本刚刚更新，请再试一次。")
     size = positive(fields, "contentsSize")
     if release.size is not None and size != release.size:
-        raise VersionDrift("下载授权的大小与选定版本不一致，请重新查询。")
+        raise VersionDrift("下载授权与所选版本的大小不符，请再试一次。")
     return DownloadGrant(release, required(fields, "downLoadURI"), size)
 
 

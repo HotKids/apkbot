@@ -23,7 +23,9 @@ def main():
     except Exception:
         raise RuntimeError("Telegram 启动检查失败，请检查 Bot Token 和网络。") from None
     if webhook.url:
-        raise RuntimeError("此 Bot 仍配置了 webhook，请先切换到轮询模式。")
+        raise RuntimeError(
+            "此 Bot 设置了 webhook，请先调用 deleteWebhook 删除后再启动。"
+        )
     init_db()
     scheduler = BackgroundScheduler(timezone=config.TZ)
     scheduler.add_job(

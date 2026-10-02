@@ -137,14 +137,14 @@ def test_card_escaping_hierarchy_and_exact_region():
     assert "&lt;name&gt;&amp;" in card.html()
     assert "<script>" not in card.html()
     assert "🇺🇸 US" in card.html()
-    assert "<b>版本：01.02.3</b>" in card.html()
+    assert "<b>版本 01.02.3</b>" in card.html()
     assert "版本代码：123" in card.html()
     assert "包名：<code>com.example.app</code>" in card.html()
     facts = card.blocks()[2]
     assert facts["type"] == "table" and facts["is_bordered"] is False
     assert [row[0]["text"] for row in facts["cells"]] == [
         "版本代码",
-        "更新时间",
+        "更新日期",
         "地区",
         "大小",
         "包名",
@@ -152,7 +152,7 @@ def test_card_escaping_hierarchy_and_exact_region():
     assert facts["cells"][4][1]["text"] == {"type": "code", "text": "com.example.app"}
     assert "product ID" not in card.html()
     assert card.blocks()[1]["type"] == "heading"
-    assert card.blocks()[1]["text"] == "版本：01.02.3"
+    assert card.blocks()[1]["text"] == "版本 01.02.3"
     notes = [block for block in card.blocks() if block["type"] == "details"]
     assert len(notes) == 1 and notes[0]["is_open"] is False
     assert any(block["type"] == "details" for block in card.blocks())
@@ -176,7 +176,7 @@ def test_edit_updates_rich_card_and_buttons_on_same_message(monkeypatch):
     fields = request.call_args.kwargs["params"]
     assert fields["chat_id"] == 100 and fields["message_id"] == 55
     blocks = json.loads(fields["rich_message"])["blocks"]
-    assert blocks[1]["text"] == "版本：2.0"
+    assert blocks[1]["text"] == "版本 2.0"
     assert blocks[-1]["buttons"] == [
         {
             "text": "下载",

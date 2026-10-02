@@ -48,7 +48,7 @@ def validate_url(url):
         host = u.hostname or ""
         port = u.port
     except ValueError:
-        raise InvalidResponse("商店返回了不合法的下载地址。") from None
+        raise InvalidResponse("商店数据异常（下载地址无效），请稍后重试。") from None
     # No arbitrary hosts, HTTP, userinfo, custom ports, or suffix lookalikes.
     if (
         u.scheme != "https"
@@ -67,7 +67,7 @@ def validate_url(url):
             )
         )
     ):
-        raise InvalidResponse("商店返回了未经允许的 HTTPS 地址。")
+        raise InvalidResponse("商店数据异常（地址不属于 Samsung），请稍后重试。")
     return url
 
 
@@ -76,7 +76,7 @@ def open_response(session, method, url, *, deadline, **kwargs):
         validate_url(url)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TransportError("商店请求超过总时限。")
+            raise TransportError("商店响应超时，请稍后重试。")
         try:
             response = session.request(
                 method,
@@ -88,22 +88,24 @@ def open_response(session, method, url, *, deadline, **kwargs):
             )
         except requests.RequestException:
             raise TransportError(
-                "无法连接 Galaxy Store，请检查网络和代理策略。"
+                "无法连接 Galaxy Store，请检查服务器网络后重试。"
             ) from None
         if response.status_code in (301, 302, 303, 307, 308):
             location = response.headers.get("Location")
             response.close()
             # Never replay an ODS POST at another destination.
             if method != "GET" or not location:
-                raise TransportError("商店返回了不允许的重定向。")
+                raise TransportError("商店返回了异常跳转，请稍后重试。")
             url = urljoin(url, location)
             continue
         if response.status_code != 200:
             status = response.status_code
             response.close()
-            raise TransportError(f"商店返回 HTTP {status}；不能据此认定应用不存在。")
+            raise TransportError(
+                f"商店暂时不可用（HTTP {status}），这不代表应用不存在；请稍后重试。"
+            )
         return response
-    raise TransportError("商店重定向次数过多。")
+    raise TransportError("商店跳转次数过多，请稍后重试。")
 
 
 def chunks(response, *, deadline, limit):
@@ -111,13 +113,13 @@ def chunks(response, *, deadline, limit):
     try:
         for block in response.iter_content(64 * 1024):
             if time.monotonic() > deadline:
-                raise TransportError("传输超过总时限。")
+                raise TransportError("商店响应超时，请稍后重试。")
             count += len(block)
             if count > limit:
-                raise DownloadError("响应超过允许的字节数。")
+                raise DownloadError("商店数据异常（响应过大），请稍后重试。")
             yield block
     except requests.RequestException:
-        raise TransportError("传输中断，请重新查询后重试。") from None
+        raise TransportError("与商店的连接中断，请稍后重试。") from None
 
 
 def request_bytes(session, method, url, **kwargs):
@@ -206,9 +208,11 @@ class GalaxyStore:
 
     def authorize(self, release):
         if release.needs_login:
-            raise LoginRequired("该应用要求 Samsung 登录，不能匿名下载。")
+            raise LoginRequired(
+                "此应用需要登录 Samsung 账号才能下载，bot 无法匿名获取。"
+            )
         if not release.installable:
-            raise ServiceError("商店标记该版本不可安装。")
+            raise ServiceError("商店将此版本标为不可安装，暂时无法下载。")
         if release.channel == "stub":
             # The stub answer that selected this release already carries its
             # URL; asking again only adds a request and a chance of drift.
@@ -219,7 +223,7 @@ class GalaxyStore:
                 grant.release.identity != release.identity
                 or grant.release.version_name != release.version_name
             ):
-                raise VersionDrift("商店版本已改变，请重新查询后下载。")
+                raise VersionDrift("商店版本刚刚更新，请再试一次。")
         else:
             grant = parse_ods_grant(
                 self._ods("2316", self.profile.download(release)), release

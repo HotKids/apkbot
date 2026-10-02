@@ -144,10 +144,10 @@ def release_card(release, notes=None, *, update=False):
     size = f"{release.size / 1_000_000:.2f} MB" if release.size is not None else "未知"
     return Card(
         title=short(release.name, 100) + (" · 有更新" if update else ""),
-        highlight=f"版本：{short(release.version_name, 100)}",
+        highlight=f"版本 {short(release.version_name, 100)}",
         facts=(
             ("版本代码", str(release.version_code)),
-            ("更新时间", release.updated_date or "暂无数据"),
+            ("更新日期", release.updated_date or "暂无数据"),
             ("地区", region_label(release.region)),
             ("大小", size),
             ("包名", code(release.package)),
@@ -160,48 +160,48 @@ def release_card(release, notes=None, *, update=False):
 def subscription_card(app, added, name=None):
     return Card(
         f"{short(name, 100) if name else 'APKDL'} · 订阅",
-        highlight="已保存订阅" if added else "此订阅已存在",
+        highlight="订阅成功" if added else "已经订阅过了",
         facts=(("包名", code(app.package)), ("地区", region_label(app.region))),
-        footer="尚未确认当前版本或首次通知；后台检查后再通知。",
+        footer="下次检查时会先推送当前版本，之后有新版本再通知。",
     )
 
 
 def help_card():
     return Card(
         "APKDL",
-        ("来源：Galaxy Store",),
+        ("查询 Samsung Galaxy Store 应用版本，获取 APK 下载链接并订阅更新。",),
         sections=(
             Section(
                 "下载与订阅",
                 rows=(
                     (code("/dl <包名或链接> [CN|US]"), "获取下载链接"),
-                    (code("/sub <包名或链接> [CN|US]"), "保存订阅"),
+                    (code("/sub <包名或链接> [CN|US]"), "订阅更新"),
                     (
                         code("/unsub <包名或链接> [CN|US]"),
                         "取消订阅；不写地区则取消该应用所有地区",
                     ),
                     (code("/unsub all"), "取消全部订阅"),
-                    (code("/list"), "查看已缓存的订阅"),
+                    (code("/list"), "查看我的订阅"),
                 ),
-                note="直接发送包名或 Galaxy Store 详情链接也可获取链接。"
-                "点「下载」直接从 Samsung 下载；链接失效后点「刷新」，原卡片更新后再点「下载」。"
-                "「复制文件名」可在下载后按“应用名_版本号.apk”改名。",
+                note="直接发送包名或 Galaxy Store 详情链接也能获取下载链接。"
+                "点「下载」由手机直接从 Samsung 下载；链接约 10 分钟有效，过期点「刷新」。"
+                "下载后可用「复制文件名」改成“应用名_版本号.apk”。",
                 opened=True,
             ),
             Section(
                 "地区",
-                "默认先尝试 US，查询或获取下载链接失败时再尝试 CN。\n"
-                "显式 CN/US 不切区。更新说明仅采用版本完全匹配的 CN 说明。",
+                "不写地区时先查 US，失败再查 CN；写明 CN 或 US 时只查该地区。\n"
+                "更新日期和更新说明取自 CN 商店，仅在版本一致时显示。",
             ),
             Section(
                 "管理员",
                 rows=(
                     (code("/check"), "立即检查所有订阅"),
-                    (code("/status"), "查看所有订阅的缓存状态"),
-                    (code("/add <id> [备注]"), "添加白名单"),
-                    (code("/del <id>"), "移除白名单"),
+                    (code("/status"), "查看所有用户的订阅"),
+                    (code("/add <用户ID> [备注]"), "加入白名单"),
+                    (code("/del <用户ID>"), "移出白名单"),
                     (code("/user"), "查看白名单"),
-                    (code("/help"), "帮助"),
+                    (code("/help"), "显示本帮助"),
                 ),
             ),
         ),
