@@ -14,6 +14,7 @@ def test_authorize_probe_reports_no_url_and_never_downloads(monkeypatch, capsys)
     store.authorize.return_value = DownloadGrant(
         release(), "https://download.samsungapps.com/a.apk?token=private", 42
     )
+    store.download_link.return_value = store.authorize.return_value
     factory = Mock()
     factory.return_value.__enter__ = Mock(return_value=store)
     factory.return_value.__exit__ = Mock(return_value=False)
@@ -27,6 +28,7 @@ def test_authorize_probe_reports_no_url_and_never_downloads(monkeypatch, capsys)
         host="download.samsungapps.com", bytes=42, apk_downloaded=False
     )
     assert "private" not in output and "https://" not in output
+    store.download_link.assert_called_once()
     store.download.assert_not_called()
 
 

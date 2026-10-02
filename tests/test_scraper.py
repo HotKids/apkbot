@@ -16,7 +16,7 @@ from galaxy_store import (
     StubRestricted,
     TransportError,
 )
-from tests.test_galaxy_store import metadata, release
+from tests.test_galaxy_store import metadata, ods, release, stub
 
 
 class Response:
@@ -125,17 +125,24 @@ def test_cn_metadata_does_not_authorize_download():
     "failure",
     [StubRestricted("restricted"), ServiceError("unknown"), TransportError("network")],
 )
-def test_auto_does_not_fallback_for_restriction_or_error(monkeypatch, failure):
+@pytest.mark.parametrize("region", ["AUTO", "US"])
+def test_auto_falls_back_after_us_query_error_but_explicit_us_does_not(
+    monkeypatch, failure, region
+):
     store = scraper.GalaxyStore(Mock())
     monkeypatch.setattr(store, "stub", Mock(side_effect=failure))
-    post = Mock()
+    post = Mock(return_value=metadata())
     monkeypatch.setattr(store, "_ods", post)
-    with pytest.raises(type(failure)):
-        store.metadata(AppRequest("com.example.app"))
-    post.assert_not_called()
+    if region == "AUTO":
+        assert store.metadata(AppRequest("com.example.app")).region == "CN"
+        post.assert_called_once()
+    else:
+        with pytest.raises(type(failure)):
+            store.metadata(AppRequest("com.example.app", "US"))
+        post.assert_not_called()
 
 
-def test_auto_fallback_only_on_explicit_absence_and_us_preference(monkeypatch):
+def test_auto_prefers_us_and_falls_back_on_absence(monkeypatch):
     store = scraper.GalaxyStore(Mock())
     stub = Mock(return_value=DownloadGrant(release(region="US"), "unused", 42))
     monkeypatch.setattr(store, "stub", stub)
@@ -149,6 +156,56 @@ def test_auto_fallback_only_on_explicit_absence_and_us_preference(monkeypatch):
     with pytest.raises(NoAvailableVersion):
         store.metadata(AppRequest("com.example.app", "US"))
     post.assert_not_called()
+
+
+@pytest.mark.parametrize("region", ["AUTO", "US"])
+def test_download_link_retries_cn_when_us_authorization_fails(region):
+    url = "https://download.samsungapps.com/cn.apk"
+    http = session(
+        Response(stub()),
+        Response(stub("Service error", "0")),
+        Response(metadata()),
+        Response(
+            ods(
+                dict(
+                    productID="00001",
+                    binaryArch="32n64",
+                    contentsSize=42,
+                    downLoadURI=url,
+                )
+            )
+        ),
+    )
+    store = scraper.GalaxyStore(http)
+    if region == "US":
+        with pytest.raises(ServiceError):
+            store.download_link(AppRequest("com.example.app", region))
+        assert http.request.call_count == 2
+    else:
+        grant = store.download_link(AppRequest("com.example.app"))
+        assert grant.release.region == "CN" and grant.url == url
+        assert http.request.call_count == 4
+        assert "reqId=2298" in http.request.call_args_list[2].args[1]
+        assert "reqId=2316" in http.request.call_args_list[3].args[1]
+
+
+def test_download_link_stops_after_us_success():
+    http = session(Response(stub()), Response(stub()))
+    grant = scraper.GalaxyStore(http).download_link(AppRequest("com.example.app"))
+    assert grant.release.region == "US"
+    assert http.request.call_count == 2
+    assert all(call.args[0] == "GET" for call in http.request.call_args_list)
+
+
+def test_download_link_does_not_loop_when_both_regions_fail():
+    http = session(
+        Response(stub("Service error", "0")),
+        Response(metadata()),
+        Response(ods(error="Service error", code="-1")),
+    )
+    with pytest.raises(ServiceError):
+        scraper.GalaxyStore(http).download_link(AppRequest("com.example.app"))
+    assert http.request.call_count == 3
 
 
 def test_login_and_installability_block_authorization(monkeypatch):

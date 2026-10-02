@@ -13,7 +13,6 @@ from galaxy_store import (
     DownloadError,
     InvalidResponse,
     LoginRequired,
-    NoAvailableVersion,
     OdsProfile,
     ServiceError,
     StoreError,
@@ -185,18 +184,29 @@ class GalaxyStore:
         if app.region != "CN":
             try:
                 return self.stub(app.package, "US").release
-            except NoAvailableVersion:
+            except StoreError:
                 if app.region == "US":
                     raise
         return parse_ods_metadata(
             self._ods("2298", self.profile.metadata(app.package)), app.package
         )
 
+    def download_link(self, app):
+        release = self.metadata(app)
+        try:
+            return self.authorize(release)
+        except StoreError:
+            if app.region != "AUTO" or release.region != "US":
+                raise
+        # US metadata can succeed while its download authorization fails.
+        # AUTO then tries CN; an explicit region never switches.
+        return self.authorize(self.metadata(AppRequest(app.package, "CN")))
+
     def authorize(self, release):
         if release.needs_login:
             raise LoginRequired("该应用要求 Samsung 登录，不能匿名下载。")
         if not release.installable:
-            raise ServiceError("商店标记该版本不可安装；不会自动切换地区。")
+            raise ServiceError("商店标记该版本不可安装。")
         if release.channel == "stub":
             grant = self.stub(release.package, release.region)
             if (

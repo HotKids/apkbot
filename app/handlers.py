@@ -65,15 +65,11 @@ def edit_progress(chat_id, message_id, text):
 def _link_once(chat_id, app, progress_id):
     try:
         with GalaxyStore() as store:
-            release = store.metadata(app)
+            grant = store.download_link(app)
+            release = grant.release
             notes = store.notes(release)
-            grant = store.authorize(release)
         markup = keyboard(app, grant.url)
-        card = release_card(
-            release,
-            "点击「下载」开始下载。链接失效后，请点「刷新链接」，再点新卡片中的「下载」。",
-            notes,
-        )
+        card = release_card(release, notes)
     except StoreError as exc:
         edit_progress(chat_id, progress_id, "获取链接失败：" + escape(str(exc)))
         return
@@ -92,9 +88,10 @@ def _link_once(chat_id, app, progress_id):
         )
         logger.warning("Link message unconfirmed; no automatic resend or APK download")
     else:
-        edit_progress(
-            chat_id, progress_id, "下载链接已发送，请点击结果卡中的「下载」。"
-        )
+        try:
+            bot.delete_message(chat_id, progress_id)
+        except Exception:
+            edit_progress(chat_id, progress_id, "下载卡片已发送。")
 
 
 def start_link(chat_id, app):
@@ -128,11 +125,7 @@ def check_app(app):
         try:
             messages.send(
                 chat_id,
-                release_card(
-                    release,
-                    "发现更新。点击「获取链接」，再点结果卡中的「下载」。",
-                    notes,
-                ),
+                release_card(release, notes, update=True),
                 keyboard(app),
             )
         except Exception:

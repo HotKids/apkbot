@@ -124,10 +124,18 @@ def test_url_button_survives_explicit_html_fallback_without_preview(monkeypatch)
 
 
 def test_card_escaping_hierarchy_and_exact_region():
-    card = release_card(release(name="<name>&", region="US"), "Downloaded", "<script>&")
+    card = release_card(release(name="<name>&", region="US"), "<script>&")
     assert "&lt;name&gt;&amp;" in card.html()
     assert "<script>" not in card.html()
-    assert "APK region: 🇺🇸 US" in card.html()
+    assert "🇺🇸 US" in card.html()
+    assert "<b>版本：01.02.3</b>" in card.html()
+    assert "版本代码：123" in card.html()
+    assert "包名：com.example.app" in card.html()
+    assert "product ID" not in card.html()
+    assert card.blocks()[1]["type"] == "heading"
+    assert card.blocks()[1]["text"] == "版本：01.02.3"
+    notes = [block for block in card.blocks() if block["type"] == "details"]
+    assert len(notes) == 1 and notes[0]["is_open"] is False
     assert any(block["type"] == "details" for block in card.blocks())
     sections = [b for b in help_card().blocks() if b["type"] == "details"]
     assert [b["is_open"] for b in sections] == [True, False, False]

@@ -249,8 +249,8 @@ def parse_ods_grant(data, release):
         raise InvalidResponse("下载授权的产品 ID 不匹配。")
     if "GUID" in fields and fields["GUID"] != release.package:
         raise InvalidResponse("下载授权的包名不匹配。")
-    if fields.get("binaryArch") != "64":
-        raise InvalidResponse("下载授权未提供预期的 64 位完整 APK。")
+    # binaryArch describes CPU coverage (e.g. 32n64), not full vs. delta APKs.
+    # Use the full download's downLoadURI and contentsSize below.
     if "version" in fields and fields["version"] != release.version_name:
         raise VersionDrift("商店版本已改变，请重新查询后下载。")
     if (

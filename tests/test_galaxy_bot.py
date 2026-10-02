@@ -6,7 +6,7 @@ import requests
 import database as db
 import handlers
 from galaxy_store import AppRequest, DownloadGrant, ServiceError, VersionDrift
-from tests.test_galaxy_store import metadata, ods, release
+from tests.test_galaxy_store import metadata, ods, release, stub
 from tests.test_richmsg import rejection
 
 
@@ -29,12 +29,15 @@ SIGNED_URL = "https://download.samsungapps.com/file.apk?token=private-link&name=
 
 
 def fake_store(monkeypatch, selected=None):
+    from scraper import GalaxyStore
+
     store = Mock()
     store.metadata.return_value = selected or release()
     store.notes.return_value = "notes"
     store.authorize.return_value = DownloadGrant(
         store.metadata.return_value, SIGNED_URL, store.metadata.return_value.size or 42
     )
+    store.download_link.side_effect = lambda app: GalaxyStore.download_link(store, app)
     factory = Mock()
     factory.return_value.__enter__ = Mock(return_value=store)
     factory.return_value.__exit__ = Mock(return_value=False)
@@ -214,7 +217,12 @@ def test_link_delivery_never_fetches_apk_or_uploads_or_persists_url(
     handlers._link_once(100, app, 5)
     store.metadata.assert_called_once_with(app)
     store.authorize.assert_called_once_with(store.metadata.return_value)
-    assert [c[0] for c in store.mock_calls] == ["metadata", "notes", "authorize"]
+    assert [c[0] for c in store.mock_calls] == [
+        "download_link",
+        "metadata",
+        "authorize",
+        "notes",
+    ]
     store.download.assert_not_called()
     transport[0].send_document.assert_not_called()
     card, markup = transport[1].send.call_args.args[1:]
@@ -227,7 +235,8 @@ def test_link_delivery_never_fetches_apk_or_uploads_or_persists_url(
     ]
     assert "APK sent" not in card.html() and "SHA256" not in card.html()
     assert f"{size / 1_000_000:.2f} MB" in card.html()
-    assert "刷新链接" in card.html() and SIGNED_URL not in card.html()
+    assert SIGNED_URL not in card.html()
+    transport[0].delete_message.assert_called_once_with(100, 5)
     assert "private-link" not in db.DB_PATH.read_bytes().decode(errors="ignore")
     assert "private-link" not in caplog.text
     assert db.get_subscriptions() == [] and db.get_app(app.key) == app
@@ -298,35 +307,54 @@ def test_source_failure_sends_no_link_and_has_safe_diagnostics(
     assert "private-link" not in caplog.text + str(transport[0].mock_calls)
 
 
-def test_cn_bot_card_authorizes_but_never_requests_apk(monkeypatch, transport):
+@pytest.mark.parametrize("architecture", ["64", "32n64"])
+@pytest.mark.parametrize("region", ["CN", "AUTO"])
+def test_cn_bot_card_authorizes_but_never_requests_apk(
+    monkeypatch, transport, architecture, region
+):
     from scraper import GalaxyStore
     from tests.test_scraper import Response, session
 
     grant = ods(
         dict(
-            productID="00001", binaryArch="64", contentsSize=42, downLoadURI=SIGNED_URL
+            productID="00001",
+            binaryArch=architecture,
+            contentsSize=42,
+            downLoadURI=SIGNED_URL,
         )
     )
-    http = session(Response(metadata()), Response(b"{}"), Response(grant))
+    responses = [Response(metadata()), Response(grant), Response(b"{}")]
+    if region == "AUTO":
+        responses.insert(
+            0,
+            Response(
+                stub("No app matched device/country/MCC/MNC/CSC/API conditions", "0")
+            ),
+        )
+    http = session(*responses)
     store = GalaxyStore(http)
     monkeypatch.setattr(handlers, "GalaxyStore", lambda: store)
-    handlers._link_once(100, AppRequest("com.example.app", "CN"), 5)
+    handlers._link_once(100, AppRequest("com.example.app", region), 5)
     calls = http.request.call_args_list
+    if region == "AUTO":
+        assert calls[0].args[0] == "GET" and "stubDownload" in calls[0].args[1]
+        calls = calls[1:]
     assert len(calls) == 3
     assert calls[0].args == (
         "POST",
         "https://cn-ms.galaxyappstore.com/ods.as?reqId=2298&ot=01&ct=B",
     )
     assert calls[1].args == (
-        "GET",
-        "https://galaxystore.samsung.com/api/detail/com.example.app?cntyCd=CHN",
-    )
-    assert calls[2].args == (
         "POST",
         "https://cn-ms.galaxyappstore.com/ods.as?reqId=2316&ot=01&ct=B",
     )
+    assert calls[2].args == (
+        "GET",
+        "https://galaxystore.samsung.com/api/detail/com.example.app?cntyCd=CHN",
+    )
     url = transport[1].send.call_args.args[2].to_dict()["inline_keyboard"][0][0]["url"]
     assert url == SIGNED_URL
+    assert "🇨🇳 CN" in transport[1].send.call_args.args[1].html()
     transport[0].send_document.assert_not_called()
 
 

@@ -214,6 +214,33 @@ def test_ods_grant_case_and_product_binding():
         parse_ods_grant(ods(dict(fields, versionCode="124")), release())
 
 
+@pytest.mark.parametrize("arch", ["32n64", "32", None])
+def test_ods_grant_does_not_confuse_architecture_with_full_apk(arch):
+    # Samsung Reminder returns a full 32n64 APK alongside optional delta fields.
+    selected = release(
+        package="com.samsung.android.app.sreminder",
+        product_id="000009060570",
+        version_name="9.4.02.7",
+        version_code=940207000,
+        size=106232505,
+    )
+    fields = dict(
+        productID=selected.product_id,
+        contentsSize=selected.size,
+        downLoadURI="https://cdnet-dn.galaxyappstore.com/full.apk",
+        deltaContentsSize="42",
+        deltaDownloadURL="https://cdnet-dn.galaxyappstore.com/delta.patch",
+    )
+    if arch is not None:
+        fields["binaryArch"] = arch
+    grant = parse_ods_grant(ods(fields), selected)
+    assert grant.release == selected
+    assert grant.size == selected.size
+    assert grant.url == fields["downLoadURI"]
+    with pytest.raises(VersionDrift):
+        parse_ods_grant(ods(dict(fields, contentsSize=42)), selected)
+
+
 def test_ods_profile_reuses_only_synthetic_identity_and_correct_guid_case():
     profile = OdsProfile()
     meta = ET.fromstring(profile.metadata("com.example.app"))

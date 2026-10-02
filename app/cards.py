@@ -8,12 +8,14 @@ from html import escape
 class Card:
     title: str
     paragraphs: tuple[str, ...] = ()
-    details: tuple[str, ...] = ()
     footer: str = "APKDL · Galaxy Store"
     sections: tuple[tuple[str, str, bool], ...] = ()
+    highlight: str = ""
 
     def blocks(self):
         blocks = [{"type": "heading", "size": 4, "text": self.title}]
+        if self.highlight:
+            blocks.append({"type": "heading", "size": 5, "text": self.highlight})
         blocks.extend({"type": "paragraph", "text": p} for p in self.paragraphs)
         for summary, text, opened in self.sections:
             blocks.append(
@@ -24,33 +26,22 @@ class Card:
                     "blocks": [{"type": "paragraph", "text": text}],
                 }
             )
-        if self.details:
-            blocks.append(
-                {
-                    "type": "details",
-                    "summary": "技术信息",
-                    "is_open": False,
-                    "blocks": [{"type": "paragraph", "text": "\n".join(self.details)}],
-                }
-            )
-        blocks.append({"type": "footer", "text": self.footer})
+        if self.footer:
+            blocks.append({"type": "footer", "text": self.footer})
         return blocks
 
     def html(self):
         lines = [f"<b>{escape(self.title)}</b>"]
+        if self.highlight:
+            lines.append(f"<b>{escape(self.highlight)}</b>")
         lines.extend(escape(p) for p in self.paragraphs)
         for summary, text, opened in self.sections:
             body = f"<b>{escape(summary)}</b>\n{escape(text)}"
             lines.append(
                 body if opened else f"<blockquote expandable>{body}</blockquote>"
             )
-        if self.details:
-            lines.append(
-                "<blockquote expandable>"
-                + escape("\n".join(self.details))
-                + "</blockquote>"
-            )
-        lines.append(f"<i>{escape(self.footer)}</i>")
+        if self.footer:
+            lines.append(f"<i>{escape(self.footer)}</i>")
         return "\n\n".join(lines)
 
 
@@ -62,27 +53,18 @@ def region_label(region):
     return {"CN": "🇨🇳 CN", "US": "🇺🇸 US", "AUTO": "🌐 AUTO"}.get(region, region)
 
 
-def release_card(release, outcome, notes=None):
-    size = release.size
-    body = [
-        outcome,
-        f"Source: Galaxy Store · APK region: {region_label(release.region)}"
-        + (f" · {size / 1_000_000:.2f} MB" if size is not None else ""),
-    ]
-    body.append(
-        "CN release notes:\n" + short(notes, 1200)
-        if notes
-        else "CN release notes: unavailable."
-    )
-    details = [
-        f"Package: {release.package}",
-        f"VersionCode: {release.version_code}",
-        f"APK product ID: {release.product_id}",
-    ]
+def release_card(release, notes=None, *, update=False):
+    size = f"{release.size / 1_000_000:.2f} MB" if release.size is not None else "未知"
     return Card(
-        f"{short(release.name, 100)} · {short(release.version_name, 100)}",
-        tuple(body),
-        tuple(details),
+        title=short(release.name, 100) + (" · 有更新" if update else ""),
+        highlight=f"版本：{short(release.version_name, 100)}",
+        paragraphs=(
+            f"版本代码：{release.version_code}",
+            f"{region_label(release.region)} · {size}",
+            f"包名：{release.package}",
+        ),
+        sections=(("更新说明（CN）", short(notes, 1200), False),) if notes else (),
+        footer="",
     )
 
 
@@ -100,7 +82,7 @@ def subscription_card(app, added):
 def help_card():
     return Card(
         "APKDL",
-        ("Source: Galaxy Store",),
+        ("来源：Galaxy Store",),
         sections=(
             (
                 "下载与订阅",
@@ -111,7 +93,7 @@ def help_card():
             ),
             (
                 "地区",
-                "默认 AUTO 优先 US，仅在明确地区不可用时尝试 CN。\n显式 CN/US 不切区。更新说明仅采用版本完全匹配的 CN 说明。",
+                "默认先尝试 US，查询或获取下载链接失败时再尝试 CN。\n显式 CN/US 不切区。更新说明仅采用版本完全匹配的 CN 说明。",
                 False,
             ),
             (

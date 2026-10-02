@@ -32,13 +32,17 @@ def main():
                 if args.region == "AUTO":
                     parser.error("--channel stub requires explicit CN or US")
                 release = store.stub(app.package, app.region).release
+                if args.authorize:
+                    grant = store.authorize(release)
+            elif args.authorize:
+                grant = store.download_link(app)
+                release = grant.release
             else:
                 release = store.metadata(app)
             result = {"metadata": asdict(release)}
             if args.notes:
                 result["cn_notes"] = store.notes(release)
             if args.authorize:
-                grant = store.authorize(release)
                 result["authorization"] = dict(
                     host=urlsplit(grant.url).hostname,
                     bytes=grant.size,
