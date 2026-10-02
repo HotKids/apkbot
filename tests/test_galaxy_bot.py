@@ -259,7 +259,8 @@ def test_link_delivery_never_fetches_apk_or_uploads_or_persists_url(
         [
             {"text": "下载", "url": SIGNED_URL},
             {"text": "刷新", "callback_data": "gdl:" + app.key},
-        ]
+        ],
+        [{"text": "复制文件名", "copy_text": {"text": "Example_01.02.3.apk"}}],
     ]
     assert "APK sent" not in card.html() and "SHA256" not in card.html()
     assert f"{size / 1_000_000:.2f} MB" in card.html()

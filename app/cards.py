@@ -1,31 +1,110 @@
-"""One card model renders both InputRichMessage blocks and escaped HTML."""
+"""One card model renders both InputRichMessage blocks and escaped HTML.
+
+RichText follows the Bot API shape: str, {"type": "bold"|"code", "text": ...},
+or a list of those. The HTML fallback renders the same data, so both forms
+carry the same wording. Explanations go to footers (grey) rather than italics,
+which are hard to see in Chinese on real clients.
+"""
 
 from dataclasses import dataclass
 from html import escape
+import re
+
+
+def bold(text):
+    return {"type": "bold", "text": text}
+
+
+def code(text):
+    return {"type": "code", "text": text}
+
+
+def rich_html(text):
+    if isinstance(text, str):
+        return escape(text)
+    if isinstance(text, (list, tuple)):
+        return "".join(rich_html(part) for part in text)
+    tag = {"bold": "b", "code": "code"}[text["type"]]
+    return f"<{tag}>{rich_html(text['text'])}</{tag}>"
+
+
+def rich_text(text):
+    # Rich blocks take str, a node, or a list; tuples are only our shorthand.
+    if isinstance(text, (list, tuple)):
+        return [rich_text(part) for part in text]
+    return text
+
+
+def table(rows):
+    # Borderless compact two-column table: labels and values line up.
+    return {
+        "type": "table",
+        "cells": [
+            [
+                {"text": rich_text(cell), "align": "left", "valign": "top"}
+                for cell in row
+            ]
+            for row in rows
+        ],
+        "is_bordered": False,
+        "is_striped": False,
+        "is_compact": True,
+    }
+
+
+@dataclass(frozen=True)
+class Section:
+    summary: str
+    text: object = ""
+    rows: tuple = ()
+    note: str = ""
+    opened: bool = False
+
+    def blocks(self):
+        inner = []
+        if self.rows:
+            inner.append(table(self.rows))
+        if self.text:
+            inner.append({"type": "paragraph", "text": rich_text(self.text)})
+        if self.note:
+            inner.append({"type": "footer", "text": self.note})
+        return {
+            "type": "details",
+            "summary": self.summary,
+            "is_open": self.opened,
+            "blocks": inner,
+        }
+
+    def html(self):
+        lines = [f"<b>{escape(self.summary)}</b>"]
+        lines.extend(f"{rich_html(a)} — {rich_html(b)}" for a, b in self.rows)
+        if self.text:
+            lines.append(rich_html(self.text))
+        if self.note:
+            lines.append(f"<i>{escape(self.note)}</i>")
+        body = "\n".join(lines)
+        return body if self.opened else f"<blockquote expandable>{body}</blockquote>"
 
 
 @dataclass(frozen=True)
 class Card:
     title: str
-    paragraphs: tuple[str, ...] = ()
+    paragraphs: tuple = ()
     footer: str = "APKDL · Galaxy Store"
-    sections: tuple[tuple[str, str, bool], ...] = ()
+    sections: tuple[Section, ...] = ()
     highlight: str = ""
+    facts: tuple = ()
 
     def blocks(self):
         blocks = [{"type": "heading", "size": 4, "text": self.title}]
         if self.highlight:
             blocks.append({"type": "heading", "size": 5, "text": self.highlight})
-        blocks.extend({"type": "paragraph", "text": p} for p in self.paragraphs)
-        for summary, text, opened in self.sections:
-            blocks.append(
-                {
-                    "type": "details",
-                    "summary": summary,
-                    "is_open": opened,
-                    "blocks": [{"type": "paragraph", "text": text}],
-                }
-            )
+        if self.facts:
+            blocks.append(table(self.facts))
+        blocks.extend(
+            {"type": "paragraph", "text": rich_text(p)} for p in self.paragraphs
+        )
+        blocks.extend(section.blocks() for section in self.sections)
         if self.footer:
             blocks.append({"type": "footer", "text": self.footer})
         return blocks
@@ -34,12 +113,12 @@ class Card:
         lines = [f"<b>{escape(self.title)}</b>"]
         if self.highlight:
             lines.append(f"<b>{escape(self.highlight)}</b>")
-        lines.extend(escape(p) for p in self.paragraphs)
-        for summary, text, opened in self.sections:
-            body = f"<b>{escape(summary)}</b>\n{escape(text)}"
+        if self.facts:
             lines.append(
-                body if opened else f"<blockquote expandable>{body}</blockquote>"
+                "\n".join(f"{escape(k)}：{rich_html(v)}" for k, v in self.facts)
             )
+        lines.extend(rich_html(p) for p in self.paragraphs)
+        lines.extend(section.html() for section in self.sections)
         if self.footer:
             lines.append(f"<i>{escape(self.footer)}</i>")
         return "\n\n".join(lines)
@@ -53,18 +132,27 @@ def region_label(region):
     return {"CN": "🇨🇳 CN", "US": "🇺🇸 US", "AUTO": "🌐 AUTO"}.get(region, region)
 
 
+def apk_filename(release):
+    # Samsung fixes the downloaded name (App_<timestamp>.apk); this is the
+    # suggested name for renaming afterwards. Copy buttons allow 256 chars.
+    stem = f"{release.name.strip()}_{release.version_name.strip()}"
+    stem = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]+', "_", stem).strip(" .")
+    return stem[:200] + ".apk"
+
+
 def release_card(release, notes=None, *, update=False):
     size = f"{release.size / 1_000_000:.2f} MB" if release.size is not None else "未知"
     return Card(
         title=short(release.name, 100) + (" · 有更新" if update else ""),
         highlight=f"版本：{short(release.version_name, 100)}",
-        paragraphs=(
-            f"版本代码：{release.version_code}",
-            f"更新时间：{release.updated_date or '暂无数据'}",
-            f"{region_label(release.region)} · {size}",
-            f"包名：{release.package}",
+        facts=(
+            ("版本代码", str(release.version_code)),
+            ("更新时间", release.updated_date or "暂无数据"),
+            ("地区", region_label(release.region)),
+            ("大小", size),
+            ("包名", code(release.package)),
         ),
-        sections=(("更新说明（CN）", short(notes, 1200), False),) if notes else (),
+        sections=(Section("更新说明（CN）", short(notes, 1200)),) if notes else (),
         footer="" if update else "链接约 10 分钟有效，过期请点「刷新」。",
     )
 
@@ -72,11 +160,9 @@ def release_card(release, notes=None, *, update=False):
 def subscription_card(app, added, name=None):
     return Card(
         f"{short(name, 100) if name else 'APKDL'} · 订阅",
-        (
-            "已保存订阅。" if added else "此订阅已存在。",
-            f"{app.package} · {region_label(app.region)}",
-            "尚未确认当前版本或首次通知；后台检查后再通知。",
-        ),
+        highlight="已保存订阅" if added else "此订阅已存在",
+        facts=(("包名", code(app.package)), ("地区", region_label(app.region))),
+        footer="尚未确认当前版本或首次通知；后台检查后再通知。",
     )
 
 
@@ -85,22 +171,38 @@ def help_card():
         "APKDL",
         ("来源：Galaxy Store",),
         sections=(
-            (
+            Section(
                 "下载与订阅",
-                "/dl <包名或详情链接> [CN|US] — 获取下载链接\n/sub <输入> [CN|US] — 保存订阅\n"
-                "/unsub <输入> [CN|US] 或 all — 取消订阅，不写地区则取消该应用所有地区\n/list — 查看已缓存的订阅\n直接发送包名或 Galaxy Store 详情链接也可获取链接。\n"
-                "点击「下载」直接从 Samsung 下载。链接失效后点「刷新」，原卡片更新后再点「下载」。",
-                True,
+                rows=(
+                    (code("/dl <包名或链接> [CN|US]"), "获取下载链接"),
+                    (code("/sub <包名或链接> [CN|US]"), "保存订阅"),
+                    (
+                        code("/unsub <包名或链接> [CN|US]"),
+                        "取消订阅；不写地区则取消该应用所有地区",
+                    ),
+                    (code("/unsub all"), "取消全部订阅"),
+                    (code("/list"), "查看已缓存的订阅"),
+                ),
+                note="直接发送包名或 Galaxy Store 详情链接也可获取链接。"
+                "点「下载」直接从 Samsung 下载；链接失效后点「刷新」，原卡片更新后再点「下载」。"
+                "「复制文件名」可在下载后按“应用名_版本号.apk”改名。",
+                opened=True,
             ),
-            (
+            Section(
                 "地区",
-                "默认先尝试 US，查询或获取下载链接失败时再尝试 CN。\n显式 CN/US 不切区。更新说明仅采用版本完全匹配的 CN 说明。",
-                False,
+                "默认先尝试 US，查询或获取下载链接失败时再尝试 CN。\n"
+                "显式 CN/US 不切区。更新说明仅采用版本完全匹配的 CN 说明。",
             ),
-            (
+            Section(
                 "管理员",
-                "/check — 检查更新\n/status — 查看缓存状态\n/add <id> [备注]\n/del <id>\n/user — 白名单\n/help — 帮助",
-                False,
+                rows=(
+                    (code("/check"), "立即检查所有订阅"),
+                    (code("/status"), "查看所有订阅的缓存状态"),
+                    (code("/add <id> [备注]"), "添加白名单"),
+                    (code("/del <id>"), "移除白名单"),
+                    (code("/user"), "查看白名单"),
+                    (code("/help"), "帮助"),
+                ),
             ),
         ),
     )

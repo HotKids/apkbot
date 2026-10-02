@@ -5,11 +5,26 @@ import logging
 import threading
 
 import telebot
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
+from telebot.types import (
+    CopyTextButton,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyParameters,
+)
 
 import config
 import database as db
-from cards import Card, help_card, region_label, release_card, subscription_card
+from cards import (
+    Card,
+    apk_filename,
+    bold,
+    code,
+    help_card,
+    region_label,
+    release_card,
+    short,
+    subscription_card,
+)
 from galaxy_store import InvalidInput, StoreError, parse_input
 from richmsg import RichMessenger
 from scraper import GalaxyStore
@@ -40,7 +55,7 @@ def allowed(message, owner=False):
     )
 
 
-def keyboard(app, url=None):
+def keyboard(app, url=None, filename=None):
     db.remember_app(app)
     markup = InlineKeyboardMarkup()
     buttons = []
@@ -52,6 +67,11 @@ def keyboard(app, url=None):
         )
     )
     markup.row(*buttons)
+    if filename:
+        # Samsung's CDN fixes the saved name; this copies "应用名_版本号.apk".
+        markup.row(
+            InlineKeyboardButton("复制文件名", copy_text=CopyTextButton(filename))
+        )
     return markup
 
 
@@ -100,7 +120,7 @@ def _link_once(chat_id, app, progress_id, callback_id=None):
             release = grant.release
             release, notes = store.details(release)
         db.cache_release(app, release, notes)
-        markup = keyboard(app, grant.url)
+        markup = keyboard(app, grant.url, apk_filename(release))
         card = release_card(release, notes)
     except StoreError as exc:
         report("获取链接失败：" + str(exc))
@@ -254,11 +274,9 @@ def handle_unsub(message):
 
 def send_cached(chat_id, all_users=False):
     rows = db.get_subscriptions(None if all_users else chat_id)
+    title = "APKDL · 订阅状态" if all_users else "APKDL · 我的订阅"
     if not rows:
-        messages.send(
-            chat_id,
-            Card("APKDL · 状态" if all_users else "APKDL · 订阅", ("当前无订阅。",)),
-        )
+        messages.send(chat_id, Card(title, ("当前无订阅。",)))
         return
     # Bound each card to fit ordinary HTML fallback as well as rich messages.
     for offset in range(0, len(rows), 6):
@@ -267,19 +285,24 @@ def send_cached(chat_id, all_users=False):
             release = db.cached_release(row)
             name = db.last_app_name(row["package"])
             version = (
-                f"{release.version_name[:100]} · {region_label(release.region)}"
+                f"版本 {short(release.version_name, 100)} · {region_label(release.region)}"
                 if release
                 else "尚未查询"
             )
             lines.append(
-                (f"{name[:100]}\n" if name else "")
-                + f"{row['package']} · {region_label(row['preference'])} — {version}"
-                + (f" · 用户 {row['chat_id']}" if all_users else "")
+                ((bold(short(name, 100)), "\n") if name else ())
+                + (
+                    code(row["package"]),
+                    f" · {region_label(row['preference'])}\n{version}"
+                    + (f" · 用户 {row['chat_id']}" if all_users else ""),
+                )
             )
         messages.send(
             chat_id,
             Card(
-                "APKDL · 缓存状态", tuple(lines), footer="缓存数据，不代表实时可用性。"
+                f"{title} · {len(rows)} 项",
+                tuple(lines),
+                footer="缓存数据，不代表实时可用性。",
             ),
         )
 
@@ -351,7 +374,8 @@ def handle_user_list(message):
     users = db.get_whitelist()
     for offset in range(0, max(1, len(users)), 10):
         lines = tuple(
-            f"{uid} · {remark}" for uid, remark in users[offset : offset + 10]
+            (code(str(uid)), f" · {remark}") if remark else code(str(uid))
+            for uid, remark in users[offset : offset + 10]
         ) or ("白名单为空。",)
         messages.send(message.chat.id, Card("APKDL · 白名单", lines))
 

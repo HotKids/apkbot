@@ -290,6 +290,29 @@ def test_cn_details_exact_match_never_changes_apk_region():
     assert chosen.region == "US"
 
 
+def test_samsung_release_labels_take_the_cn_display_name():
+    label = "[260921] GALAXY Store 9CR Update -  US"
+    chosen = release(region="US", name=label, version_name="4.6.11.4")
+
+    def response(name="三星应用商店", version="4.6.11.4"):
+        return dict(
+            appId=chosen.package,
+            DetailMain=dict(
+                countryCode="CHN", contentName=name, contentBinaryVersion=version
+            ),
+        )
+
+    fixed, _ = match_cn_details(response(), chosen)
+    assert fixed.name == "三星应用商店" and fixed.identity == chosen.identity
+    # The name is version independent; notes still need the exact version.
+    assert match_cn_details(response(version="1.0"), chosen)[0].name == "三星应用商店"
+    assert match_cn_details(response(name=" "), chosen)[0].name == label
+    plain = release(region="US", name="Samsung Notes")
+    assert match_cn_details(response(), plain)[0].name == "Samsung Notes"
+    other = dict(response(), appId="com.other.app")
+    assert match_cn_details(other, chosen)[0].name == label
+
+
 @pytest.mark.parametrize(
     "value, expected",
     [

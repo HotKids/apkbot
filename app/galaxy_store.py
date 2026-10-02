@@ -55,6 +55,9 @@ class VersionDrift(DownloadError):
 
 
 PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+")
+# Samsung lists some of its own US builds under release labels such as
+# "[260921] GALAXY Store 9CR Update -  US" (stub and US web page alike).
+RELEASE_LABEL = re.compile(r"\[\d+\]\s")
 
 
 @dataclass(frozen=True)
@@ -360,11 +363,13 @@ def match_cn_details(response, release):
     detail = response.get("DetailMain")
     if not isinstance(detail, dict):
         return release, None
-    if (
-        response.get("appId") != release.package
-        or detail.get("countryCode") != "CHN"
-        or detail.get("contentBinaryVersion") != release.version_name
-    ):
+    if response.get("appId") != release.package or detail.get("countryCode") != "CHN":
+        return release, None
+    # The display name does not depend on the version; only replace labels.
+    name = detail.get("contentName")
+    if RELEASE_LABEL.match(release.name) and isinstance(name, str) and name.strip():
+        release = replace(release, name=name.strip())
+    if detail.get("contentBinaryVersion") != release.version_name:
         return release, None
     # modifyDate is the store's update date, not our query or link expiry time.
     # A CN date must not be presented as the US release's update date.
