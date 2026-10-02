@@ -6,7 +6,6 @@ import threading
 
 import telebot
 from telebot.types import (
-    CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyParameters,
@@ -16,7 +15,7 @@ import config
 import database as db
 from cards import (
     Card,
-    apk_filename,
+    Entry,
     bold,
     code,
     help_card,
@@ -55,7 +54,7 @@ def allowed(message, owner=False):
     )
 
 
-def keyboard(app, url=None, filename=None):
+def keyboard(app, url=None):
     db.remember_app(app)
     markup = InlineKeyboardMarkup()
     buttons = []
@@ -67,11 +66,6 @@ def keyboard(app, url=None, filename=None):
         )
     )
     markup.row(*buttons)
-    if filename:
-        # Samsung's CDN fixes the saved name; this copies "应用名_版本号.apk".
-        markup.row(
-            InlineKeyboardButton("📋 复制文件名", copy_text=CopyTextButton(filename))
-        )
     return markup
 
 
@@ -120,7 +114,7 @@ def _link_once(chat_id, app, progress_id, callback_id=None):
             release = grant.release
             release, notes = store.details(release)
         db.cache_release(app, release, notes)
-        markup = keyboard(app, grant.url, apk_filename(release))
+        markup = keyboard(app, grant.url)
         card = release_card(release, notes)
     except StoreError as exc:
         report("获取下载链接失败：" + str(exc))
@@ -279,6 +273,45 @@ def handle_unsub(message):
         )
 
 
+def subscription_entry(row, all_users):
+    release = db.cached_release(row)
+    name = db.last_app_name(row["package"])
+    head = (
+        (bold(short(name, 100)) if name else code(row["package"])),
+        f" · {region_label(row['preference'])}",
+    )
+    if all_users:
+        head += (f" · 用户 {row['chat_id']}",)
+    quote = (
+        (
+            "版本 ",
+            bold(short(release.version_name, 100)),
+            f" · {region_label(release.region)}",
+        )
+        if release
+        else "版本待检查"
+    )
+    # With a name on the head line, the package goes to the quote's credit.
+    return Entry(head, quote, row["package"] if name else "")
+
+
+def list_keyboard(rows):
+    # One button per app, two per row; each opens a new download card and
+    # leaves the list in place.
+    buttons = []
+    for row in rows:
+        label = db.last_app_name(row["package"]) or row["package"]
+        buttons.append(
+            InlineKeyboardButton(
+                "⬇️ " + short(label, 24), callback_data="ldl:" + row["app_key"]
+            )
+        )
+    markup = InlineKeyboardMarkup()
+    for offset in range(0, len(buttons), 2):
+        markup.row(*buttons[offset : offset + 2])
+    return markup
+
+
 def send_cached(chat_id, all_users=False):
     rows = db.get_subscriptions(None if all_users else chat_id)
     title = "APKDL · 订阅状态" if all_users else "APKDL · 我的订阅"
@@ -288,30 +321,15 @@ def send_cached(chat_id, all_users=False):
         return
     # Bound each card to fit ordinary HTML fallback as well as rich messages.
     for offset in range(0, len(rows), 6):
-        lines = []
-        for row in rows[offset : offset + 6]:
-            release = db.cached_release(row)
-            name = db.last_app_name(row["package"])
-            version = (
-                f"版本 {short(release.version_name, 100)} · {region_label(release.region)}"
-                if release
-                else "版本待检查"
-            )
-            lines.append(
-                ((bold(short(name, 100)), "\n") if name else ())
-                + (
-                    code(row["package"]),
-                    f" · {region_label(row['preference'])}\n{version}"
-                    + (f" · 用户 {row['chat_id']}" if all_users else ""),
-                )
-            )
+        page = rows[offset : offset + 6]
         messages.send(
             chat_id,
             Card(
                 f"{title} · {len(rows)} 项",
-                tuple(lines),
+                entries=tuple(subscription_entry(row, all_users) for row in page),
                 footer="版本为上次检查的结果，不是实时数据。",
             ),
+            None if all_users else list_keyboard(page),
         )
 
 
@@ -396,7 +414,7 @@ def handle_user_list(message):
 
 
 @bot.callback_query_handler(
-    func=lambda call: bool(call.data and call.data.startswith("gdl:"))
+    func=lambda call: bool(call.data and call.data.startswith(("gdl:", "ldl:")))
 )
 def handle_link_callback(call):
     if not (
@@ -411,6 +429,11 @@ def handle_link_callback(call):
     app = db.get_app(call.data[4:])
     if not app:
         bot.answer_callback_query(call.id, "找不到这条应用记录，请重新发送包名。")
+        return
+    if call.data.startswith("ldl:"):
+        # List buttons open a new download card; the list itself stays.
+        answer_link_callback(call.id, "正在获取下载链接……")
+        start_link(call.message.chat.id, app)
         return
     start_link(
         call.message.chat.id,
