@@ -1,8 +1,17 @@
 """Synchronous TeleBot adapter; ambiguous sends never trigger a second send."""
 
 import json
+import logging
+import re
 import threading
 from telebot import apihelper, types
+
+logger = logging.getLogger("apkdl-bot")
+
+
+def rejection_text(exc):
+    # Telegram's reason helps fix a card; never let a signed URL reach logs.
+    return re.sub(r"https?://\S+", "<url>", exc.description)[:200]
 
 
 class UnconfirmedDelivery(RuntimeError):
@@ -12,8 +21,8 @@ class UnconfirmedDelivery(RuntimeError):
 def button_blocks(reply_markup):
     """Inline keyboard → one `buttons` block per row, drawn inside the card.
 
-    External downloads are green and callbacks (refresh / get link) blue; copy
-    buttons keep the default style. The inline keyboard form has no styles.
+    External downloads are green and callbacks (refresh / get link) blue.
+    The inline keyboard form has no styles.
     """
     rows = reply_markup.to_dict()["inline_keyboard"] if reply_markup else []
     blocks = []
@@ -61,11 +70,20 @@ class RichMessenger:
                             # The card was refused, not sent: keep the card and
                             # move the buttons back under it for this run.
                             self.buttons = False
+                            logger.warning(
+                                "Card buttons rejected, using inline keyboard: %s",
+                                rejection_text(exc),
+                            )
                             continue
                         if self._unsupported(exc, message_id):
                             self.supported = False
                         elif not self._malformed(exc):
                             raise
+                        # Otherwise a fallback is silent and a broken card
+                        # looks like a plain message with no clue why.
+                        logger.warning(
+                            "Rich card rejected, sent as HTML: %s", rejection_text(exc)
+                        )
                         # A specific Bot API rejection proves this card was not sent.
                         # Generic 404, auth errors, 429, timeouts and network loss escape.
                         break

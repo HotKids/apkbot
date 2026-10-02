@@ -115,6 +115,67 @@ def test_list_status_and_legacy_controls_use_only_cache(monkeypatch, transport):
     assert transport[1].send.call_count == 2
 
 
+def test_list_is_a_rich_card_with_one_quote_and_button_per_app(transport):
+    from tests.test_richmsg import assert_valid_blocks
+
+    named = AppRequest("com.example.app")
+    db.add_subscription(100, named)
+    db.cache_release(named, release(name="三星生活助手", version_name="9.4"), None)
+    unnamed = AppRequest("com.other.app", "US")
+    db.add_subscription(100, unnamed)
+    handlers.handle_list(message("/list"))
+    card, markup = transport[1].send.call_args.args[1:]
+    blocks = card.blocks()
+    assert_valid_blocks(blocks)
+    assert [b["type"] for b in blocks] == [
+        "heading",
+        "paragraph",
+        "blockquote",
+        "paragraph",
+        "blockquote",
+        "footer",
+    ]
+    assert card.title == "APKDL · 我的订阅 · 2 项"
+    assert blocks[1]["text"] == [
+        {"type": "bold", "text": "三星生活助手"},
+        " · 🌐 AUTO",
+    ]
+    assert blocks[2]["credit"] == "com.example.app"
+    assert blocks[2]["blocks"][0]["text"] == [
+        "版本 ",
+        {"type": "bold", "text": "9.4"},
+        " · 🇨🇳 CN",
+    ]
+    assert blocks[3]["text"][0] == {"type": "code", "text": "com.other.app"}
+    assert "credit" not in blocks[4]
+    assert blocks[4]["blocks"][0]["text"] == "版本待检查"
+    assert markup.to_dict()["inline_keyboard"] == [
+        [
+            {"text": "⬇️ 三星生活助手", "callback_data": "ldl:" + named.key},
+            {"text": "⬇️ com.other.app", "callback_data": "ldl:" + unnamed.key},
+        ]
+    ]
+    html = card.html()
+    assert "<b>三星生活助手</b> · 🌐 AUTO\n<blockquote>版本 <b>9.4</b>" in html
+    handlers.handle_status(message("/status"))
+    status_card, status_markup = transport[1].send.call_args.args[1:]
+    assert status_markup is None and "用户 100" in status_card.html()
+
+
+def test_list_button_opens_a_new_download_card_and_keeps_the_list(
+    monkeypatch, transport
+):
+    app = AppRequest("com.example.app", "CN")
+    db.add_subscription(100, app)
+    launch = Mock()
+    monkeypatch.setattr(handlers, "start_link", launch)
+    handlers.handle_link_callback(
+        NS(id="list", data="ldl:" + app.key, message=message(), from_user=NS(id=100))
+    )
+    launch.assert_called_once_with(100, app)
+    transport[0].answer_callback_query.assert_called_once()
+
+
 def test_durable_callback_requeries_latest_without_subscribing(monkeypatch, transport):
     app = AppRequest("com.example.app", "CN")
     db.remember_app(app)
@@ -261,8 +322,7 @@ def test_link_delivery_never_fetches_apk_or_uploads_or_persists_url(
         [
             {"text": "⬇️ 下载", "url": SIGNED_URL},
             {"text": "🔄 刷新", "callback_data": "gdl:" + app.key},
-        ],
-        [{"text": "📋 复制文件名", "copy_text": {"text": "Example_01.02.3.apk"}}],
+        ]
     ]
     assert "APK sent" not in card.html() and "SHA256" not in card.html()
     assert f"{size / 1_000_000:.2f} MB" in card.html()

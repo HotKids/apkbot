@@ -8,7 +8,6 @@ which are hard to see in Chinese on real clients.
 
 from dataclasses import dataclass
 from html import escape
-import re
 
 
 def bold(text):
@@ -87,6 +86,34 @@ class Section:
 
 
 @dataclass(frozen=True)
+class Entry:
+    """A list item after kdbot: a head line plus a quote, so items stay apart.
+
+    Each line is its own block; no RichText mixes nodes across line breaks.
+    """
+
+    head: object
+    quote: object
+    credit: str = ""
+
+    def blocks(self):
+        quote = {
+            "type": "blockquote",
+            "blocks": [{"type": "paragraph", "text": rich_text(self.quote)}],
+        }
+        if self.credit:
+            quote["credit"] = self.credit
+        return [{"type": "paragraph", "text": rich_text(self.head)}, quote]
+
+    def html(self):
+        credit = f"\n{escape(self.credit)}" if self.credit else ""
+        return (
+            f"{rich_html(self.head)}\n"
+            f"<blockquote>{rich_html(self.quote)}{credit}</blockquote>"
+        )
+
+
+@dataclass(frozen=True)
 class Card:
     title: str
     paragraphs: tuple = ()
@@ -94,6 +121,7 @@ class Card:
     sections: tuple[Section, ...] = ()
     highlight: str = ""
     facts: tuple = ()
+    entries: tuple[Entry, ...] = ()
 
     def blocks(self):
         blocks = [{"type": "heading", "size": 4, "text": self.title}]
@@ -104,6 +132,8 @@ class Card:
         blocks.extend(
             {"type": "paragraph", "text": rich_text(p)} for p in self.paragraphs
         )
+        for entry in self.entries:
+            blocks.extend(entry.blocks())
         blocks.extend(section.blocks() for section in self.sections)
         if self.footer:
             blocks.append({"type": "footer", "text": self.footer})
@@ -118,6 +148,7 @@ class Card:
                 "\n".join(f"{escape(k)}：{rich_html(v)}" for k, v in self.facts)
             )
         lines.extend(rich_html(p) for p in self.paragraphs)
+        lines.extend(entry.html() for entry in self.entries)
         lines.extend(section.html() for section in self.sections)
         if self.footer:
             lines.append(f"<i>{escape(self.footer)}</i>")
@@ -130,14 +161,6 @@ def short(value, maximum):
 
 def region_label(region):
     return {"CN": "🇨🇳 CN", "US": "🇺🇸 US", "AUTO": "🌐 AUTO"}.get(region, region)
-
-
-def apk_filename(release):
-    # Samsung fixes the downloaded name (App_<timestamp>.apk); this is the
-    # suggested name for renaming afterwards. Copy buttons allow 256 chars.
-    stem = f"{release.name.strip()}_{release.version_name.strip()}"
-    stem = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]+', "_", stem).strip(" .")
-    return stem[:200] + ".apk"
 
 
 def release_card(release, notes=None, *, update=False):
@@ -184,8 +207,7 @@ def help_card():
                     (code("/list"), "查看我的订阅"),
                 ),
                 note="直接发送包名或 Galaxy Store 详情链接也能获取下载链接。"
-                "点「下载」由手机直接从 Samsung 下载；链接约 10 分钟有效，过期点「刷新」。"
-                "下载后可用「复制文件名」改成“应用名_版本号.apk”。",
+                "点「下载」由手机直接从 Samsung 下载；链接约 10 分钟有效，过期点「刷新」。",
                 opened=True,
             ),
             Section(

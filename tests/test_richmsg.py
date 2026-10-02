@@ -7,7 +7,8 @@ from telebot import apihelper
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from cards import (
     Card,
-    apk_filename,
+    Entry,
+    bold,
     help_card,
     release_card,
     subscription_card,
@@ -252,15 +253,19 @@ def test_unchanged_edit_is_success_without_duplicate_message(monkeypatch, rich):
 
 
 INLINE = {"bold", "code"}
-BLOCKS = {"heading", "paragraph", "table", "details", "footer", "buttons"}
-ACTIONS = {"url", "callback_data", "copy_text"}
+BLOCKS = {"heading", "paragraph", "table", "details", "footer", "buttons", "blockquote"}
+ACTIONS = {"url", "callback_data"}
 
 
 def valid_text(text):
     if isinstance(text, str):
         return True
     if isinstance(text, list):
-        return bool(text) and all(valid_text(part) and part != "" for part in text)
+        # Whitespace-only pieces (a lone "\n" between nodes) are avoided.
+        return bool(text) and all(
+            valid_text(part) and not (isinstance(part, str) and not part.strip())
+            for part in text
+        )
     return (
         isinstance(text, dict)
         and text.get("type") in INLINE
@@ -288,6 +293,9 @@ def assert_valid_blocks(blocks):
         if kind == "details":
             assert valid_text(block["summary"]) and isinstance(block["is_open"], bool)
             assert_valid_blocks(block["blocks"])
+        if kind == "blockquote":
+            assert_valid_blocks(block["blocks"])
+            assert isinstance(block.get("credit", ""), str)
         if kind == "buttons":
             assert 1 <= len(block["buttons"]) <= 8
             for button in block["buttons"]:
@@ -296,15 +304,10 @@ def assert_valid_blocks(blocks):
 
 
 def download_keys():
-    from telebot.types import CopyTextButton
-
     keys = InlineKeyboardMarkup()
     keys.row(
         InlineKeyboardButton("下载", url="https://download.samsungapps.com/a.apk"),
         InlineKeyboardButton("刷新", callback_data="gdl:key"),
-    )
-    keys.row(
-        InlineKeyboardButton("复制文件名", copy_text=CopyTextButton("Example_1.apk"))
     )
     return keys
 
@@ -316,7 +319,16 @@ def download_keys():
         release_card(release(size=None, updated_date="2026-08-25"), update=True),
         subscription_card(AppRequest("com.example.app"), True, "Example"),
         help_card(),
-        Card("APKDL · 我的订阅", (("名称", "\n"), "当前无订阅。")),
+        Card(
+            "APKDL · 我的订阅 · 1 项",
+            entries=(
+                Entry(
+                    (bold("名称"), " · 🌐 AUTO"),
+                    ("版本 ", bold("1.0"), " · 🇨🇳 CN"),
+                    "com.example.app",
+                ),
+            ),
+        ),
     ],
 )
 def test_every_card_and_button_row_matches_rich_block_shapes(card):
@@ -324,12 +336,9 @@ def test_every_card_and_button_row_matches_rich_block_shapes(card):
     assert card.html()
 
 
-def test_buttons_are_colored_by_action_and_copy_text_is_kept():
-    first, second = button_blocks(download_keys())
-    assert [b.get("style") for b in first["buttons"]] == ["success", "primary"]
-    assert second["buttons"] == [
-        {"text": "复制文件名", "copy_text": {"text": "Example_1.apk"}}
-    ]
+def test_buttons_are_colored_by_action():
+    (row,) = button_blocks(download_keys())
+    assert [b.get("style") for b in row["buttons"]] == ["success", "primary"]
     assert button_blocks(None) == [] and button_blocks(InlineKeyboardMarkup()) == []
 
 
@@ -367,12 +376,16 @@ def test_rejected_button_blocks_fall_back_to_card_with_inline_keyboard(monkeypat
     bot.edit_message_text.assert_not_called()
 
 
-def test_suggested_filename_is_app_name_and_version_without_path_characters():
-    assert apk_filename(release(name="瑞幸咖啡", version_name="5.6.1")) == (
-        "瑞幸咖啡_5.6.1.apk"
+def test_rejected_card_logs_the_reason_without_urls(monkeypatch, caplog):
+    error = rejection(
+        400,
+        "Bad Request: can't parse InputRichBlock: https://cdn.example/a?sig=private",
     )
-    assert apk_filename(release(name='a/b:c*"d', version_name="1.0 ")) == (
-        "a_b_c_d_1.0.apk"
+    monkeypatch.setattr(apihelper, "_make_request", Mock(side_effect=error))
+    bot = Mock(
+        token="synthetic", send_message=Mock(return_value=SimpleNamespace(message_id=1))
     )
-    long = apk_filename(release(name="x" * 300))
-    assert long.endswith(".apk") and len(long) <= 256
+    RichMessenger(bot).send(1, Card("A"))
+    bot.send_message.assert_called_once()
+    assert "Rich card rejected" in caplog.text and "can't parse" in caplog.text
+    assert "private" not in caplog.text and "<url>" in caplog.text
