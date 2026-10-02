@@ -553,7 +553,8 @@ def test_startup_rejects_unavailable_api_or_existing_webhook(
 
 
 def test_sigterm_stops_polling_and_restores_signal_handler(monkeypatch):
-    import main, signal
+    import main
+    import signal
 
     previous = signal.getsignal(signal.SIGTERM)
     monkeypatch.setattr(handlers.bot, "get_me", Mock(return_value=NS(id=123456)))
