@@ -5,7 +5,7 @@ import logging
 import threading
 
 import telebot
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 
 import config
 import database as db
@@ -68,14 +68,31 @@ def answer_link_callback(callback_id, text):
     except Exception:
         # Slow source requests can outlive Telegram's callback query window.
         logger.warning("Link callback acknowledgement unavailable")
+        return False
+    return True
+
+
+def reply_under(chat_id, message_id, text):
+    try:
+        bot.send_message(
+            chat_id,
+            escape(text),
+            reply_parameters=ReplyParameters(
+                message_id, allow_sending_without_reply=True
+            ),
+        )
+    except Exception:
+        logger.warning("Refresh failure notice unconfirmed")
 
 
 def _link_once(chat_id, app, progress_id, callback_id=None):
     def report(text):
-        if callback_id:
-            answer_link_callback(callback_id, text)
-        else:
+        if not callback_id:
             edit_progress(chat_id, progress_id, escape(text))
+        elif not answer_link_callback(callback_id, text):
+            # The refresh outlived its callback. Reply under the card instead of
+            # overwriting it, so a failure is never silent.
+            reply_under(chat_id, progress_id, text)
 
     try:
         with GalaxyStore() as store:
@@ -221,6 +238,11 @@ def handle_unsub(message):
         text = argument(message)
         if text == "all":
             count = db.remove_all_subscriptions(message.chat.id)
+        elif len(text.split()) == 1:
+            # No region given: remove this package in every region.
+            count = db.remove_package_subscriptions(
+                message.chat.id, parse_input(text).package
+            )
         else:
             count = int(db.remove_subscription(message.chat.id, parse_input(text)))
         bot.reply_to(message, f"已取消 {count} 个订阅。")

@@ -146,6 +146,7 @@ class GalaxyStore:
     def __init__(self, session=None):
         self.session = session or new_session()
         self.profile = OdsProfile()
+        self._stub_grant = None
 
     def __enter__(self):
         return self
@@ -178,7 +179,8 @@ class GalaxyStore:
             systemId=str(int(time.time() * 1000)),
         )
         data = request_bytes(self.session, "GET", STUB_URL + "?" + urlencode(params))
-        return parse_stub(data, package, region)
+        self._stub_grant = parse_stub(data, package, region)
+        return self._stub_grant
 
     def metadata(self, app: AppRequest):
         if app.region != "CN":
@@ -198,7 +200,7 @@ class GalaxyStore:
         except StoreError:
             if app.region != "AUTO" or release.region != "US":
                 raise
-        # US metadata can succeed while its download authorization fails.
+        # A US release can still fail authorization (e.g. an unusable URL).
         # AUTO then tries CN; an explicit region never switches.
         return self.authorize(self.metadata(AppRequest(app.package, "CN")))
 
@@ -208,7 +210,11 @@ class GalaxyStore:
         if not release.installable:
             raise ServiceError("商店标记该版本不可安装。")
         if release.channel == "stub":
-            grant = self.stub(release.package, release.region)
+            # The stub answer that selected this release already carries its
+            # URL; asking again only adds a request and a chance of drift.
+            grant = self._stub_grant
+            if grant is None or grant.release != release:
+                grant = self.stub(release.package, release.region)
             if (
                 grant.release.identity != release.identity
                 or grant.release.version_name != release.version_name

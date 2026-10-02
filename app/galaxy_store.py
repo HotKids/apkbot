@@ -87,17 +87,14 @@ def parse_input(text):
             u = urlsplit(value)
         except ValueError:
             raise InvalidInput("Galaxy Store 详情链接不合法。") from None
+        # Share links append ?session_id=…; only the path names the package.
         if (
             u.scheme != "https"
             or u.netloc != "galaxystore.samsung.com"
-            or "?" in value
-            or "#" in value
             or not u.path.startswith("/detail/")
             or u.path.count("/") != 2
         ):
-            raise InvalidInput(
-                "仅接受 https://galaxystore.samsung.com/detail/<包名>，不带查询参数。"
-            )
+            raise InvalidInput("仅接受 https://galaxystore.samsung.com/detail/<包名>。")
         value = u.path[len("/detail/") :]
     return AppRequest(value, parts[1].upper() if len(parts) == 2 else "AUTO")
 

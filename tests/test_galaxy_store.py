@@ -78,6 +78,13 @@ def stub(message="success", code="1", **changes):
         ("com.example.app", "AUTO"),
         ("com.example.app CN", "CN"),
         ("https://galaxystore.samsung.com/detail/com.example.app US", "US"),
+        (
+            "https://galaxystore.samsung.com/detail/com.example.app?session_id=W_ab12",
+            "AUTO",
+        ),
+        ("https://galaxystore.samsung.com/detail/com.example.app?q=1#x cn", "CN"),
+        ("https://galaxystore.samsung.com/detail/com.example.app?", "AUTO"),
+        ("https://galaxystore.samsung.com/detail/com.example.app#", "AUTO"),
     ],
 )
 def test_accepted_inputs(text, region):
@@ -92,14 +99,12 @@ def test_accepted_inputs(text, region):
         "example",
         "com..app",
         "https://evil.test/detail/com.example.app",
-        "https://galaxystore.samsung.com/detail/com.example.app?q=1",
-        "https://galaxystore.samsung.com/detail/com.example.app#x",
         "https://galaxystore.samsung.com/detail/com.example.app/",
         "https://galaxystore.samsung.com:443/detail/com.example.app",
+        "https://galaxystore.samsung.com/detail/com.example.app/extra?x=1",
+        "https://galaxystore.samsung.com/detail/?id=com.example.app",
         "com.example.app HK",
         "https://[galaxystore.samsung.com/detail/com.example.app",
-        "https://galaxystore.samsung.com/detail/com.example.app?",
-        "https://galaxystore.samsung.com/detail/com.example.app#",
     ],
 )
 def test_rejects_ambiguous_inputs(text):

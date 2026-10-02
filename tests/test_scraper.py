@@ -15,6 +15,7 @@ from galaxy_store import (
     ServiceError,
     StubRestricted,
     TransportError,
+    VersionDrift,
 )
 from tests.test_galaxy_store import metadata, ods, release, stub
 
@@ -162,8 +163,7 @@ def test_auto_prefers_us_and_falls_back_on_absence(monkeypatch):
 def test_download_link_retries_cn_when_us_authorization_fails(region):
     url = "https://download.samsungapps.com/cn.apk"
     http = session(
-        Response(stub()),
-        Response(stub("Service error", "0")),
+        Response(stub(downloadURI="https://evil.test/file.apk")),
         Response(metadata()),
         Response(
             ods(
@@ -178,23 +178,37 @@ def test_download_link_retries_cn_when_us_authorization_fails(region):
     )
     store = scraper.GalaxyStore(http)
     if region == "US":
-        with pytest.raises(ServiceError):
+        with pytest.raises(InvalidResponse):
             store.download_link(AppRequest("com.example.app", region))
-        assert http.request.call_count == 2
+        assert http.request.call_count == 1
     else:
         grant = store.download_link(AppRequest("com.example.app"))
         assert grant.release.region == "CN" and grant.url == url
-        assert http.request.call_count == 4
-        assert "reqId=2298" in http.request.call_args_list[2].args[1]
-        assert "reqId=2316" in http.request.call_args_list[3].args[1]
+        assert http.request.call_count == 3
+        assert "reqId=2298" in http.request.call_args_list[1].args[1]
+        assert "reqId=2316" in http.request.call_args_list[2].args[1]
 
 
-def test_download_link_stops_after_us_success():
-    http = session(Response(stub()), Response(stub()))
+def test_download_link_reuses_the_us_stub_answer():
+    http = session(Response(stub()))
     grant = scraper.GalaxyStore(http).download_link(AppRequest("com.example.app"))
     assert grant.release.region == "US"
+    assert grant.url == "https://download.samsungapps.com/file.apk?secret=private"
+    assert http.request.call_count == 1
+    assert http.request.call_args.args[0] == "GET"
+
+
+def test_stub_authorization_requeries_a_release_it_did_not_just_see():
+    selected = scraper.parse_stub(stub(), "com.example.app", "US").release
+    http = session(Response(stub()), Response(stub(versionCode="124")))
+    store = scraper.GalaxyStore(http)
+    assert store.authorize(selected).release == selected
+    assert store.authorize(selected).release == selected
+    assert http.request.call_count == 1
+    store._stub_grant = None
+    with pytest.raises(VersionDrift):
+        store.authorize(selected)
     assert http.request.call_count == 2
-    assert all(call.args[0] == "GET" for call in http.request.call_args_list)
 
 
 def test_download_link_does_not_loop_when_both_regions_fail():

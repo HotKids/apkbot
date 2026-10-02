@@ -1,5 +1,7 @@
+from datetime import datetime, timedelta
 import logging
 import signal
+from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 import config
 
@@ -31,6 +33,9 @@ def main():
         id="galaxy_check",
         max_instances=1,
         coalesce=True,
+        # A plain interval would restart its countdown on every deploy, so
+        # frequent rebuilds could postpone checks indefinitely.
+        next_run_time=datetime.now(ZoneInfo(config.TZ)) + timedelta(minutes=1),
     )
     scheduler.start()
     previous_sigterm = signal.signal(signal.SIGTERM, lambda *_: bot.stop_polling())

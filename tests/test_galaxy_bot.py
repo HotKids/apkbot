@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
 import logging
@@ -485,6 +486,32 @@ def test_expired_callback_acknowledgement_does_not_undo_successful_edit(
     transport[0].send_message.assert_not_called()
 
 
+def test_refresh_failure_after_expired_callback_replies_under_card(
+    monkeypatch, transport, caplog
+):
+    store = fake_store(monkeypatch)
+    store.metadata.side_effect = ServiceError("商店暂时不可用。")
+    transport[0].answer_callback_query.side_effect = rejection(400, "query is too old")
+    handlers._link_once(100, AppRequest("com.example.app", "CN"), 55, "expired")
+    transport[0].send_message.assert_called_once()
+    chat_id, text = transport[0].send_message.call_args.args
+    reply = transport[0].send_message.call_args.kwargs["reply_parameters"]
+    assert chat_id == 100 and "失败" in text and reply.message_id == 55
+    transport[0].edit_message_text.assert_not_called()
+    transport[1].edit.assert_not_called()
+
+
+def test_unsub_without_region_removes_every_region_of_that_package(transport):
+    for region in ("AUTO", "CN", "US"):
+        db.add_subscription(100, AppRequest("com.example.app", region))
+    handlers.handle_unsub(message("/unsub com.example.app CN"))
+    assert transport[0].reply_to.call_args.args[1] == "已取消 1 个订阅。"
+    url = "https://galaxystore.samsung.com/detail/com.example.app?session_id=W_1"
+    handlers.handle_unsub(message("/unsub " + url))
+    assert transport[0].reply_to.call_args.args[1] == "已取消 2 个订阅。"
+    assert db.get_subscriptions(100) == []
+
+
 def test_real_application_startup_and_shutdown_with_polling_stub(monkeypatch):
     import main
     import socket
@@ -512,7 +539,10 @@ def test_real_application_startup_and_shutdown_with_polling_stub(monkeypatch):
     def polling(**kwargs):
         assert kwargs["allowed_updates"] == ["message", "callback_query"]
         assert schedulers[0].running
-        assert schedulers[0].get_job("galaxy_check") is not None
+        job = schedulers[0].get_job("galaxy_check")
+        # The first check follows startup instead of a full interval later.
+        delay = job.next_run_time - datetime.now(timezone.utc)
+        assert timedelta(seconds=30) < delay <= timedelta(minutes=1)
         assert db.get_subscriptions() == []
 
     monkeypatch.setattr(handlers.bot, "infinity_polling", polling)

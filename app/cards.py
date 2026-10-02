@@ -88,7 +88,7 @@ def help_card():
             (
                 "下载与订阅",
                 "/dl <包名或详情链接> [CN|US] — 获取下载链接\n/sub <输入> [CN|US] — 保存订阅\n"
-                "/unsub <输入> [CN|US] 或 all — 取消订阅\n/list — 查看已缓存的订阅\n直接发送包名或 Galaxy Store 详情链接也可获取链接。\n"
+                "/unsub <输入> [CN|US] 或 all — 取消订阅，不写地区则取消该应用所有地区\n/list — 查看已缓存的订阅\n直接发送包名或 Galaxy Store 详情链接也可获取链接。\n"
                 "点击「下载」直接从 Samsung 下载。链接失效后点「刷新」，原卡片更新后再点「下载」。",
                 True,
             ),
