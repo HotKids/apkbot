@@ -10,7 +10,6 @@ from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 import config
 import database as db
 from cards import Card, help_card, region_label, release_card, subscription_card
-from download_links import download_url
 from galaxy_store import InvalidInput, StoreError, parse_input
 from richmsg import RichMessenger
 from scraper import GalaxyStore
@@ -18,8 +17,6 @@ from telegram_transport import install_transport
 
 config.validate_bot_config()
 install_transport()
-if config.LOCAL_BOT_API_URL:
-    telebot.apihelper.API_URL = config.LOCAL_BOT_API_URL + "/bot{0}/{1}"
 bot = telebot.TeleBot(config.BOT_TOKEN, parse_mode="HTML")
 messages = RichMessenger(bot)
 logger = logging.getLogger("apkdl-bot")
@@ -43,9 +40,18 @@ def allowed(message, owner=False):
     )
 
 
-def keyboard(app, user_id):
+def keyboard(app, url=None):
+    db.remember_app(app)
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("下载", url=download_url(app, user_id)))
+    buttons = []
+    if url:
+        buttons.append(InlineKeyboardButton("下载", url=url))
+    buttons.append(
+        InlineKeyboardButton(
+            "刷新链接" if url else "获取链接", callback_data="gdl:" + app.key
+        )
+    )
+    markup.row(*buttons)
     return markup
 
 
@@ -61,10 +67,11 @@ def _link_once(chat_id, app, progress_id):
         with GalaxyStore() as store:
             release = store.metadata(app)
             notes = store.notes(release)
-        markup = keyboard(app, chat_id)
+            grant = store.authorize(release)
+        markup = keyboard(app, grant.url)
         card = release_card(
             release,
-            "点击「下载」即可自动获取新链接并开始下载。\n每次点击下载当时的最新版本。",
+            "点击「下载」开始下载。链接失效后，请点「刷新链接」，再点新卡片中的「下载」。",
             notes,
         )
     except StoreError as exc:
@@ -77,8 +84,7 @@ def _link_once(chat_id, app, progress_id):
         )
         return
     try:
-        # This is a stable, signed redirect entry, not an expiring Samsung URL.
-        # Download authorization is deferred until the browser opens it.
+        # Only the button carries the temporary Samsung URL; never fetch APK bytes.
         messages.send(chat_id, card, markup)
     except Exception:
         edit_progress(
@@ -87,7 +93,7 @@ def _link_once(chat_id, app, progress_id):
         logger.warning("Link message unconfirmed; no automatic resend or APK download")
     else:
         edit_progress(
-            chat_id, progress_id, "下载入口已发送，请点击结果卡中的「下载」。"
+            chat_id, progress_id, "下载链接已发送，请点击结果卡中的「下载」。"
         )
 
 
@@ -124,10 +130,10 @@ def check_app(app):
                 chat_id,
                 release_card(
                     release,
-                    "发现更新。点击「下载」自动获取新链接并下载最新版本。",
+                    "发现更新。点击「获取链接」，再点结果卡中的「下载」。",
                     notes,
                 ),
-                keyboard(app, chat_id),
+                keyboard(app),
             )
         except Exception:
             logger.warning("Notification unconfirmed; subscriber remains pending")
@@ -183,7 +189,7 @@ def handle_sub(message):
         messages.send(
             message.chat.id,
             subscription_card(app, added),
-            keyboard(app, message.chat.id),
+            keyboard(app),
         )
 
 

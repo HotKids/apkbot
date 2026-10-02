@@ -1,20 +1,11 @@
-"""Bounded Galaxy Store HTTP and APK download boundary."""
+"""Galaxy Store metadata and download authorization; never fetches APK files."""
 
-from dataclasses import dataclass, replace
-from hashlib import sha256
 import json
 import logging
-from pathlib import Path
-import tempfile
 import time
 from urllib.parse import urlencode, urljoin, urlsplit
-from uuid import uuid4
-import zipfile
 
 import requests
-from pyaxmlparser.axmlprinter import AXMLPrinter
-from pyaxmlparser.axmlparser import AXMLParser
-from pyaxmlparser import constants as axml_constants
 
 import config
 from galaxy_store import (
@@ -24,7 +15,6 @@ from galaxy_store import (
     LoginRequired,
     NoAvailableVersion,
     OdsProfile,
-    Release,
     ServiceError,
     StoreError,
     TransportError,
@@ -137,127 +127,6 @@ def request_bytes(session, method, url, **kwargs):
         return b"".join(chunks(response, deadline=deadline, limit=METADATA_LIMIT))
 
 
-@dataclass(frozen=True)
-class Downloaded:
-    release: Release
-    path: Path
-    sha256: str
-    size: int
-
-
-def manifest_identity(path):
-    """Read only a bounded binary manifest, without extracting or installing APKs."""
-    try:
-        with zipfile.ZipFile(path) as archive:
-            matches = [
-                i for i in archive.infolist() if i.filename == "AndroidManifest.xml"
-            ]
-            if len(matches) != 1 or matches[0].file_size > 4_000_000:
-                raise DownloadError("APK 缺少唯一且大小受限的清单。")
-            data = archive.read(matches[0])  # ZIP CRC checked for the manifest.
-        if not data.startswith(b"\x03\x00"):
-            raise DownloadError("APK 清单不是 Android 二进制 XML。")
-        # AXMLPrinter tolerates duplicate attributes and malformed nesting. Reject
-        # those first, so our package/version interpretation cannot differ from
-        # Android's parser merely because a later duplicate overwrote a value.
-        raw_parser = AXMLParser(data)
-        stack = []
-        roots = 0
-        for _ in range(200_000):
-            if not raw_parser.is_valid():
-                raise DownloadError("APK 清单结构不合法。")
-            event = next(raw_parser)
-            if event == axml_constants.START_TAG:
-                if not stack:
-                    roots += 1
-                stack.append((raw_parser.namespace, raw_parser.name))
-                if len(stack) > 256 or roots > 1:
-                    raise DownloadError("APK 清单结构过于复杂。")
-                seen = set()
-                for index in range(raw_parser.getAttributeCount()):
-                    key = (
-                        raw_parser.getAttributeNamespace(index),
-                        raw_parser.getAttributeName(index),
-                    )
-                    if key in seen:
-                        raise DownloadError("APK 清单含有重复属性。")
-                    seen.add(key)
-            elif event == axml_constants.END_TAG:
-                if not stack or stack.pop() != (raw_parser.namespace, raw_parser.name):
-                    raise DownloadError("APK 清单标签不匹配。")
-            elif event == axml_constants.END_DOCUMENT:
-                if stack or roots != 1:
-                    raise DownloadError("APK 清单未完整结束。")
-                break
-        else:
-            raise DownloadError("APK 清单结构过于复杂。")
-        parser = AXMLPrinter(data)
-        if not parser.is_valid():
-            raise DownloadError("APK 清单无法解析。")
-        root = parser.get_xml_obj()
-        ns = "{http://schemas.android.com/apk/res/android}"
-        if root is None or root.tag != "manifest" or root.get("split"):
-            raise DownloadError("不是受支持的完整 APK。")
-        major = int(root.get(ns + "versionCodeMajor", "0"), 0)
-        code_raw = root.get(ns + "versionCode", "")
-        code = int(code_raw, 16 if code_raw.startswith("0x") else 10)
-        return root.get("package"), root.get(ns + "versionName"), (major << 32) | code
-    except DownloadError:
-        raise
-    except Exception:
-        raise DownloadError("APK 清单损坏或无法读取。") from None
-
-
-def download_apk(session, grant, directory):
-    if not 0 < grant.size <= config.MAX_APK_BYTES:
-        raise DownloadError("APK 大小超出允许范围。")
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=True)
-    deadline = time.monotonic() + config.DOWNLOAD_DEADLINE
-    partial = None
-    try:
-        with open_response(session, "GET", grant.url, deadline=deadline) as response:
-            encoding = response.headers.get("Content-Encoding", "identity").lower()
-            if encoding not in ("", "identity"):
-                raise DownloadError("APK 使用了不支持的内容编码。")
-            length = response.headers.get("Content-Length")
-            if length is not None and (
-                not length.isdecimal() or int(length) != grant.size
-            ):
-                raise DownloadError("APK 长度与授权不匹配。")
-            digest = sha256()
-            count = 0
-            with tempfile.NamedTemporaryFile(
-                dir=directory, suffix=".part", delete=False
-            ) as output:
-                partial = Path(output.name)
-                for block in chunks(response, deadline=deadline, limit=grant.size):
-                    output.write(block)
-                    digest.update(block)
-                    count += len(block)
-            if count != grant.size:
-                raise DownloadError("APK 未完整下载。")
-        if time.monotonic() > deadline:
-            raise DownloadError("APK 下载超过总时限。")
-        if manifest_identity(partial) != (
-            grant.release.package,
-            grant.release.version_name,
-            grant.release.version_code,
-        ):
-            raise VersionDrift("APK 清单与选定版本不一致；未交付文件，请重新查询。")
-        # Valid Android package IDs may already consume NAME_MAX. Keep the
-        # complete identity in metadata while bounding the generated filename.
-        name = f"{grant.release.package[:160]}_{grant.release.region}_{grant.release.version_code}_{uuid4().hex[:12]}.apk"
-        final = directory / name
-        partial.replace(final)
-        return Downloaded(
-            replace(grant.release, size=count), final, digest.hexdigest(), count
-        )
-    finally:
-        if partial is not None:
-            partial.unlink(missing_ok=True)
-
-
 def notes_from_response(data, release):
     def unique_object(pairs):
         result = {}
@@ -341,9 +210,6 @@ class GalaxyStore:
             )
         validate_url(grant.url)
         return grant
-
-    def download(self, release, directory):
-        return download_apk(self.session, self.authorize(release), directory)
 
     def notes(self, release):
         try:

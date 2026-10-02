@@ -2,4 +2,3 @@ pyTelegramBotAPI==4.28.0
 requests==2.32.5
 APScheduler==3.11.0
 defusedxml==0.7.1
-pyaxmlparser==0.3.31

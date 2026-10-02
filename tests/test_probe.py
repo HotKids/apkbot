@@ -30,13 +30,13 @@ def test_authorize_probe_reports_no_url_and_never_downloads(monkeypatch, capsys)
     store.download.assert_not_called()
 
 
-def test_probe_cannot_authorize_only_and_download_together(monkeypatch, capsys):
+def test_probe_rejects_removed_full_download_option(monkeypatch, capsys):
     factory = Mock()
     monkeypatch.setattr(probe, "GalaxyStore", factory)
     monkeypatch.setattr(
         probe.sys,
         "argv",
-        ["probe", "com.example.app", "--authorize", "--download-to", "unused"],
+        ["probe", "com.example.app", "--download-to", "unused"],
     )
     with pytest.raises(SystemExit) as caught:
         probe.main()

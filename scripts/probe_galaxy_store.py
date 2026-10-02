@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Credential-free probe. Metadata by default; explicit authorization/download options."""
+"""Credential-free metadata/authorization probe. Never fetches APK files."""
 
 import argparse
 from dataclasses import asdict
@@ -19,16 +19,10 @@ def main():
     parser.add_argument("--region", choices=("AUTO", "US", "CN"), default="AUTO")
     parser.add_argument("--channel", choices=("default", "stub"), default="default")
     parser.add_argument("--notes", action="store_true")
-    action = parser.add_mutually_exclusive_group()
-    action.add_argument(
+    parser.add_argument(
         "--authorize",
         action="store_true",
         help="Authorize without fetching APK bytes or printing its URL; may record anonymous store activity",
-    )
-    action.add_argument(
-        "--download-to",
-        type=Path,
-        help="Authorize and download a full APK; may record anonymous store activity",
     )
     args = parser.parse_args()
     try:
@@ -49,15 +43,6 @@ def main():
                     host=urlsplit(grant.url).hostname,
                     bytes=grant.size,
                     apk_downloaded=False,
-                )
-            if args.download_to:
-                download = store.download(release, args.download_to)
-                result["download"] = dict(
-                    path=str(download.path),
-                    bytes=download.size,
-                    sha256=download.sha256,
-                    manifest_verified=True,
-                    signature_verified=False,
                 )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0

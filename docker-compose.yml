@@ -1,25 +1,9 @@
 services:
-  telegram-bot-api:
-    image: aiogram/telegram-bot-api:latest
-    profiles: [local-api]
-    restart: unless-stopped
-    environment:
-      TELEGRAM_API_ID: ${API_ID:-}
-      TELEGRAM_API_HASH: ${API_HASH:-}
-      TELEGRAM_LOCAL: "1"
-    volumes:
-      - ./data/bot-api:/var/lib/telegram-bot-api
-
   apkdl-bot:
     build: .
     restart: unless-stopped
     stop_grace_period: 45s
     env_file:
       - .env
-    environment:
-      DOWNLOAD_BIND_HOST: 0.0.0.0
-      DOWNLOAD_BIND_PORT: "8080"
-    ports:
-      - "127.0.0.1:8080:8080"
     volumes:
       - ./data:/data

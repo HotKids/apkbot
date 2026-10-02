@@ -13,10 +13,6 @@ _scratch = tempfile.TemporaryDirectory(prefix="apkdl-tests-")
 os.environ["BOT_TOKEN"] = "123456:offline-test-only"
 os.environ["OWNER_ID"] = "100"
 os.environ["DB_PATH"] = str(Path(_scratch.name) / "bootstrap.db")
-os.environ["LOCAL_BOT_API_URL"] = ""
-os.environ["PUBLIC_DOWNLOAD_BASE_URL"] = "https://downloads.example.test"
-os.environ["DOWNLOAD_BIND_HOST"] = "127.0.0.1"
-os.environ["DOWNLOAD_BIND_PORT"] = "8080"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 
