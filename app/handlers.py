@@ -48,7 +48,7 @@ def keyboard(app, url=None):
         buttons.append(InlineKeyboardButton("下载", url=url))
     buttons.append(
         InlineKeyboardButton(
-            "刷新链接" if url else "获取链接", callback_data="gdl:" + app.key
+            "刷新" if url else "获取下载链接", callback_data="gdl:" + app.key
         )
     )
     markup.row(*buttons)
@@ -62,7 +62,21 @@ def edit_progress(chat_id, message_id, text):
         logger.warning("Progress edit failed; no replacement sent")
 
 
-def _link_once(chat_id, app, progress_id):
+def answer_link_callback(callback_id, text):
+    try:
+        bot.answer_callback_query(callback_id, text)
+    except Exception:
+        # Slow source requests can outlive Telegram's callback query window.
+        logger.warning("Link callback acknowledgement unavailable")
+
+
+def _link_once(chat_id, app, progress_id, callback_id=None):
+    def report(text):
+        if callback_id:
+            answer_link_callback(callback_id, text)
+        else:
+            edit_progress(chat_id, progress_id, escape(text))
+
     try:
         with GalaxyStore() as store:
             grant = store.download_link(app)
@@ -71,39 +85,42 @@ def _link_once(chat_id, app, progress_id):
         markup = keyboard(app, grant.url)
         card = release_card(release, notes)
     except StoreError as exc:
-        edit_progress(chat_id, progress_id, "获取链接失败：" + escape(str(exc)))
+        report("获取链接失败：" + str(exc))
         return
     except Exception:
-        edit_progress(chat_id, progress_id, "获取链接失败，请稍后重试。")
+        report("获取链接失败，请稍后重试。")
         logger.error(
             "Link preparation failed; diagnostic details suppressed to protect transient URLs"
         )
         return
     try:
         # Only the button carries the temporary Samsung URL; never fetch APK bytes.
-        messages.send(chat_id, card, markup)
+        messages.edit(chat_id, progress_id, card, markup)
     except Exception:
-        edit_progress(
-            chat_id, progress_id, "链接消息送达未确认，请先检查聊天记录；未自动重发。"
-        )
-        logger.warning("Link message unconfirmed; no automatic resend or APK download")
+        if callback_id:
+            answer_link_callback(callback_id, "更新未确认，请查看原卡片后再试。")
+        # An edit timeout may have succeeded. Do not overwrite the same card
+        # with an error message, retry the edit, or send a duplicate.
+        logger.warning("Link edit unconfirmed; original message left in place")
     else:
-        try:
-            bot.delete_message(chat_id, progress_id)
-        except Exception:
-            edit_progress(chat_id, progress_id, "下载卡片已发送。")
+        if callback_id:
+            answer_link_callback(callback_id, "链接已更新，请点「下载」。")
 
 
-def start_link(chat_id, app):
+def start_link(chat_id, app, message_id=None, callback_id=None):
     if not _link_slots.acquire(blocking=False):
-        bot.send_message(chat_id, "已有两个链接请求，请稍后再试。")
+        if callback_id:
+            answer_link_callback(callback_id, "已有两个链接请求，请稍后再试。")
+        else:
+            bot.send_message(chat_id, "已有两个链接请求，请稍后再试。")
         return
     try:
-        progress = bot.send_message(chat_id, "正在查询 Galaxy Store……")
+        if message_id is None:
+            message_id = bot.send_message(chat_id, "正在查询 Galaxy Store……").message_id
 
         def worker():
             try:
-                _link_once(chat_id, app, progress.message_id)
+                _link_once(chat_id, app, message_id, callback_id)
             finally:
                 _link_slots.release()
 
@@ -331,8 +348,12 @@ def handle_link_callback(call):
     if not app:
         bot.answer_callback_query(call.id, "此应用记录不存在，请重新输入包名。")
         return
-    bot.answer_callback_query(call.id, "正在查询最新版本……")
-    start_link(call.message.chat.id, app)
+    start_link(
+        call.message.chat.id,
+        app,
+        message_id=call.message.message_id,
+        callback_id=call.id,
+    )
 
 
 @bot.callback_query_handler(

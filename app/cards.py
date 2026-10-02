@@ -64,7 +64,7 @@ def release_card(release, notes=None, *, update=False):
             f"包名：{release.package}",
         ),
         sections=(("更新说明（CN）", short(notes, 1200), False),) if notes else (),
-        footer="",
+        footer="" if update else "链接约 10 分钟有效，过期请点「刷新」。",
     )
 
 
@@ -88,7 +88,7 @@ def help_card():
                 "下载与订阅",
                 "/dl <包名或详情链接> [CN|US] — 获取下载链接\n/sub <输入> [CN|US] — 保存订阅\n"
                 "/unsub <输入> [CN|US] 或 all — 取消订阅\n/list — 查看已缓存的订阅\n直接发送包名或 Galaxy Store 详情链接也可获取链接。\n"
-                "点击「下载」直接从 Samsung 下载。链接失效后点「刷新链接」，再点新卡片中的「下载」。",
+                "点击「下载」直接从 Samsung 下载。链接失效后点「刷新」，原卡片更新后再点「下载」。",
                 True,
             ),
             (

@@ -139,3 +139,86 @@ def test_card_escaping_hierarchy_and_exact_region():
     assert any(block["type"] == "details" for block in card.blocks())
     sections = [b for b in help_card().blocks() if b["type"] == "details"]
     assert [b["is_open"] for b in sections] == [True, False, False]
+
+
+def test_edit_updates_rich_card_and_buttons_on_same_message(monkeypatch):
+    request = Mock(
+        return_value=dict(message_id=55, date=0, chat=dict(id=100, type="private"))
+    )
+    monkeypatch.setattr(apihelper, "_make_request", request)
+    bot = Mock(token="synthetic-only")
+    keys = InlineKeyboardMarkup()
+    keys.add(
+        InlineKeyboardButton("下载", url="https://download.samsungapps.com/new.apk")
+    )
+    card = release_card(release(version_name="2.0", version_code=200))
+    assert RichMessenger(bot).edit(100, 55, card, keys).message_id == 55
+    assert request.call_args.args == ("synthetic-only", "editMessageText")
+    fields = request.call_args.kwargs["params"]
+    assert fields["chat_id"] == 100 and fields["message_id"] == 55
+    assert json.loads(fields["rich_message"])["blocks"][1]["text"] == "版本：2.0"
+    assert json.loads(fields["reply_markup"]) == keys.to_dict()
+    bot.send_message.assert_not_called()
+    bot.edit_message_text.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Bad Request: message text is empty",
+        "Unsupported InputRichMessageBlock type specified",
+    ],
+)
+def test_edit_html_fallback_keeps_original_message_and_keyboard(
+    monkeypatch, description
+):
+    monkeypatch.setattr(
+        apihelper, "_make_request", Mock(side_effect=rejection(400, description))
+    )
+    bot = Mock(
+        token="synthetic",
+        edit_message_text=Mock(return_value=SimpleNamespace(message_id=55)),
+    )
+    keys = InlineKeyboardMarkup()
+    keys.add(
+        InlineKeyboardButton("下载", url="https://download.samsungapps.com/new.apk")
+    )
+    RichMessenger(bot).edit(100, 55, release_card(release()), keys)
+    options = bot.edit_message_text.call_args.kwargs
+    assert options["chat_id"] == 100 and options["message_id"] == 55
+    assert options["reply_markup"] is keys
+    assert options["link_preview_options"].is_disabled
+    bot.send_message.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        requests.Timeout("private-url"),
+        rejection(401, "Unauthorized"),
+        rejection(400, "URL invalid private-url"),
+    ],
+)
+def test_uncertain_edit_never_retries_or_sends_new_message(monkeypatch, failure):
+    request = Mock(side_effect=failure)
+    monkeypatch.setattr(apihelper, "_make_request", request)
+    bot = Mock(token="synthetic")
+    with pytest.raises(type(failure)):
+        RichMessenger(bot).edit(100, 55, Card("Latest"))
+    request.assert_called_once()
+    bot.edit_message_text.assert_not_called()
+    bot.send_message.assert_not_called()
+
+
+@pytest.mark.parametrize("rich", [True, False])
+def test_unchanged_edit_is_success_without_duplicate_message(monkeypatch, rich):
+    error = rejection(
+        400,
+        "Bad Request: message is not modified: content and reply markup are the same",
+    )
+    monkeypatch.setattr(apihelper, "_make_request", Mock(side_effect=error))
+    bot = Mock(token="synthetic", edit_message_text=Mock(side_effect=error))
+    messenger = RichMessenger(bot)
+    messenger.supported = rich
+    assert messenger.edit(100, 55, Card("Same")) is True
+    bot.send_message.assert_not_called()
