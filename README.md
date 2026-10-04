@@ -1,10 +1,12 @@
 # apkbot
 
-通过 Telegram 查询 Galaxy Store 应用、获取 APK 下载链接并订阅版本更新。APK 由设备直接从 Samsung 服务器下载。
+Galaxy Store 应用下载与更新订阅工具，提供 Telegram bot 和通用油猴脚本。支持美国区和中国区，APK 由设备直接从 Samsung 服务器下载。
 
-## 使用
+## Telegram bot
 
-仅限管理员及白名单用户私聊使用。发送包名或 Galaxy Store 详情链接即可查询，也可输入 `/` 选择命令。
+查询应用信息、获取下载链接并订阅版本更新。仅限管理员及白名单用户私聊使用。
+
+发送包名或 Galaxy Store 应用详情链接即可查询，也可输入 `/` 选择命令。例如：
 
 ```text
 com.samsung.android.app.sreminder CN
@@ -14,9 +16,9 @@ com.samsung.android.app.sreminder CN
 | --- | --- |
 | `/dl <包名或链接> [CN\|US]` | 获取应用信息及下载链接 |
 | `/sub <包名或链接> [CN\|US]` | 订阅版本更新 |
-| `/list` | 查看个人订阅 |
+| `/list` | 查看我的订阅 |
 | `/unsub <包名或链接> [CN\|US]` | 取消指定订阅 |
-| `/unsub all` | 取消全部个人订阅 |
+| `/unsub all` | 取消我的全部订阅 |
 
 以下命令仅限管理员：
 
@@ -29,15 +31,23 @@ com.samsung.android.app.sreminder CN
 | `/check` | 立即检查更新 |
 | `/help` | 查看帮助 |
 
-未指定地区时依次尝试 US、CN；指定地区时仅查询对应商店。取消订阅时未指定地区，将取消该应用所有地区的订阅。
+未指定地区时先尝试 US，失败后再尝试 CN；指定 `CN` 或 `US` 时仅查询对应商店。取消订阅时省略地区，将取消该应用所有地区的订阅。
 
-默认每 24 小时检查更新，启动约 1 分钟后首次检查。订阅首次检查成功后通知当前版本，后续按版本代码判断更新，地区切换不视为更新。
+默认每 24 小时检查更新，启动约 1 分钟后首次检查。订阅首次检查成功时通知当前版本，之后仅在版本代码增加时通知。订阅列表显示最近一次查询的结果。
 
-下载链接有效期约为 10 分钟，失效后请点击「刷新」。订阅通知中点击「获取下载链接」，再点击「下载」。应用可能受地区、设备或账户限制。
+查询结果中点击「下载」即可下载 APK；订阅确认或更新通知中先点击「获取下载链接」，再点击「下载」。链接有效期约为 10 分钟，失效后请点击「刷新」。
 
-## 部署
+## 油猴脚本
 
-服务器须安装 Git、[Docker Engine 与 Compose 插件](https://docs.docker.com/engine/install/)，并能访问 Telegram 和 Samsung。无需域名或开放入站端口。
+在 Galaxy Store 的应用详情网页中提供「下载」按钮，可独立使用。
+
+安装 [Tampermonkey](https://www.tampermonkey.net/) 后，点击 [安装脚本](https://raw.githubusercontent.com/HotKids/apkbot/main/galaxy-store/galaxy-store.user.js)。随后打开应用详情网页，点击「下载」。Android 可在 Edge 的「扩展」中安装 Tampermonkey。
+
+安装步骤、地区选择及使用示例见 [油猴脚本说明](galaxy-store/README.md)。
+
+## 部署 bot
+
+服务器须安装 Git、[Docker Engine 与 Compose 插件](https://docs.docker.com/engine/install/)，并能访问 Telegram 和 Samsung。
 
 ```sh
 git clone https://github.com/HotKids/apkbot.git
@@ -47,7 +57,7 @@ chmod 600 .env
 nano .env
 ```
 
-在 `.env` 中填写 [BotFather](https://t.me/BotFather) 提供的 Token 和管理员的 Telegram 数字用户 ID：
+在 `.env` 中填写 [BotFather](https://t.me/BotFather) 提供的 bot Token 和管理员的 Telegram 数字用户 ID：
 
 ```dotenv
 BOT_TOKEN=your_bot_token
@@ -59,34 +69,7 @@ docker compose up -d --build
 docker compose logs --tail=100 apkdl-bot
 ```
 
-日志显示 `apkbot started` 后，在 Telegram 中发送包名验证。备份时须保留 `.env` 和 `data`，订阅与白名单保存在 `data/app.db`。
-
-## VPS 目录迁移
-
-以下命令将 `~/apkdl-tg-bot` 迁移至 `~/apkbot`，保留配置及数据。目标目录须不存在；原目录不同时，请替换对应路径。迁移期间服务暂时停止。
-
-```sh
-(
-  set -e
-  cd "$HOME/apkdl-tg-bot"
-  if [ -e "$HOME/apkbot" ] || [ -L "$HOME/apkbot" ]; then
-    printf '%s\n' 'Target directory already exists: ~/apkbot' >&2
-    exit 1
-  fi
-  git remote set-url origin https://github.com/HotKids/apkbot.git
-  git pull --ff-only
-  docker compose down
-  mv "$HOME/apkdl-tg-bot" "$HOME/apkbot"
-  cd "$HOME/apkbot"
-  docker compose up -d --build
-  docker compose ps
-  docker compose logs --tail=100 apkdl-bot
-)
-```
-
-Compose 服务名仍为 `apkdl-bot`。迁移后均在 `~/apkbot` 中操作。命令出错时会停止；启动失败时，请在该目录排查并重新启动。
-
-## 维护
+日志显示 `apkbot started` 后，在 Telegram 中发送包名验证。订阅与白名单保存在 `data/app.db`；备份时保留 `.env` 和 `data` 目录。
 
 更新：
 
@@ -94,11 +77,3 @@ Compose 服务名仍为 `apkdl-bot`。迁移后均在 `~/apkbot` 中操作。命
 git pull --ff-only
 docker compose up -d --build
 ```
-
-停止：
-
-```sh
-docker compose down
-```
-
-另提供 [Galaxy Store 油猴脚本](galaxy-store/README.md)，可在网页的应用详情页下载 APK。
