@@ -101,4 +101,4 @@ docker compose up -d --build
 docker compose down
 ```
 
-另提供 [三星生活助手独立下载工具](samsung-assistant/README.md)，支持浏览器书签及 Python 脚本。
+另提供 [Galaxy Store 油猴脚本](galaxy-store/README.md)，可在应用详情页获取 APK 下载链接。
