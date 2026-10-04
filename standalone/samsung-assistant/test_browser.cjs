@@ -65,6 +65,9 @@ const xml = fields => `<SamsungProtocol><response><errorString errorCode="0">Suc
       assert.match(requests[0], /name="getDownloadInfo" id="2298" numParam="12"/);
       assert.match(requests[1], /name="downloadForRestore" id="2316" numParam="11"/);
       assert.equal(await page.locator("#assistant-download a").getAttribute("href"), grant.downLoadURI);
+      assert.equal(await page.locator("#assistant-download a").textContent(), "下载");
+      assert.match(await page.locator("[data-state]").textContent(), /下载链接已获取/);
+      assert.match(await page.locator("#assistant-download p:nth-of-type(2)").textContent(), /^版本：/);
     });
     await run("rerun removes the old download link", [xml(metadata), xml(grant), '<SamsungProtocol><errorString errorCode="1">Denied</errorString></SamsungProtocol>'], "ready", async page => {
       await page.evaluate(url => { location.href = url; }, bookmarklet);
@@ -83,13 +86,24 @@ const xml = fields => `<SamsungProtocol><response><errorString errorCode="0">Suc
     await run("duplicate response fields are rejected", [xml(metadata).replace("</response>", '<param name="GUID">duplicate</param></response>')], "error");
     await run("oversized XML is rejected while reading", ["x".repeat(2000001)], "error");
     await run("positive numbers tolerate leading zeroes", [xml({ ...metadata, versionCode: "0940207000", realContentsSize: "01234" }), xml({ ...grant, versionCode: "940207000" })], "ready");
+    const nativeFailure = await browser.newPage();
+    try {
+      await nativeFailure.route("**/*", route => route.fulfill({ contentType: "text/html", body: "<html><body></body></html>" }));
+      await nativeFailure.goto("https://cn-ms.galaxyappstore.com/");
+      await nativeFailure.evaluate(() => { crypto.subtle.digest = () => Promise.reject(new DOMException("Operation failed.", "OperationError")); });
+      await nativeFailure.evaluate(url => { location.href = url; }, bookmarklet);
+      await nativeFailure.waitForFunction(() => document.querySelector("[data-state]")?.dataset.state === "error");
+      assert.equal(await nativeFailure.locator("[data-state]").textContent(), "暂时无法完成请求，请稍后重试。");
+      checks++;
+      console.log("PASS native errors use the Chinese fallback");
+    } finally { await nativeFailure.close(); }
     const installer = await browser.newPage({ viewport: { width: 412, height: 915 } });
     try {
       await installer.setContent(fs.readFileSync(path.join(__dirname, "install.html"), "utf8"));
       assert.equal(await installer.locator("#bookmark").inputValue(), bookmarklet);
       assert.equal(await installer.locator(".open").getAttribute("href"), "https://cn-ms.galaxyappstore.com/");
       await installer.locator("#copy").click();
-      assert.match(await installer.locator("#status").textContent(), /Copied|copy it manually/);
+      assert.match(await installer.locator("#status").textContent(), /已复制|手动复制/);
       assert.equal(await installer.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       checks++;
       console.log("PASS installation page matches source and fits mobile width");

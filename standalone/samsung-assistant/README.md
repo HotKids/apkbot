@@ -10,13 +10,15 @@ use Telegram, bot configuration, a proxy, or an APK parsing service.
 Open `install.html` to copy the bookmark URL and follow the steps on that page.
 Alternatively, copy the complete single line from `bookmarklet.txt`.
 
-1. In Chrome, save any page as a bookmark named **Assistant APK**.
+1. In Chrome, save any page as a bookmark named **三星生活助手下载**.
 2. Edit that bookmark and replace its entire address with the copied
    `javascript:...` URL. Do not paste it into the address bar to run it.
 3. Open <https://cn-ms.galaxyappstore.com/>. A blank page is normal.
-4. Type **Assistant APK** into the address bar and select its bookmark suggestion.
-5. Wait for the app information, then tap **Download APK**. If the link expires,
+4. Type **三星生活助手下载** into the address bar and select its bookmark suggestion.
+5. Wait for the app information, then tap **下载**. If the link expires,
    run the bookmark again to request a new one.
+
+The bookmark and installation page display Simplified Chinese.
 
 The bookmark runs on Samsung's origin so that its requests are same-origin.
 Running an ordinary local HTML page cannot read these responses across origins.
@@ -65,7 +67,7 @@ manager; the bookmark does not inspect the downloaded APK.
 
 The Python fallback also completed a live desktop download of the same release
 and byte count on 2026-10-04. The repository's 286 offline Python tests, including
-37 standalone-client cases, passed. Thirteen offline browser checks and Ruff
+37 standalone-client cases, passed. Fourteen offline browser checks and Ruff
 also passed. The tests exercise the protocol, error and file-handling paths with
 synthetic responses. A live Python download on Android remains **unverified**.
 

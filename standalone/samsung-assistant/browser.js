@@ -1,8 +1,9 @@
 void (async () => {
+  class StoreError extends Error {}
   const origin = "https://cn-ms.galaxyappstore.com";
   const packageName = "com.samsung.android.app.sreminder";
   if (location.origin !== origin) {
-    alert("Open the Samsung page, then run this bookmark again. A blank page is normal.");
+    alert("请先打开三星页面，再次运行此书签。页面空白属正常现象。");
     location.assign(origin + "/");
     return;
   }
@@ -11,13 +12,13 @@ void (async () => {
   panel.id = "assistant-download";
   panel.style.cssText = "font:16px/1.6 system-ui;margin:24px auto;padding:20px;max-width:480px;color:#17202a;background:#fff;border:1px solid #ddd;border-radius:16px";
   const title = document.createElement("h2");
-  title.textContent = "Samsung Assistant";
+  title.textContent = "三星生活助手";
   const status = document.createElement("p");
-  status.textContent = "Querying the latest version…";
+  status.textContent = "正在查询应用信息，请稍候。";
   status.dataset.state = "pending";
   const info = document.createElement("p");
   const action = document.createElement("a");
-  action.textContent = "Download APK";
+  action.textContent = "下载";
   action.hidden = true;
   action.style.cssText = "padding:12px 20px;background:#1769e0;color:#fff;border-radius:10px;text-decoration:none";
   const hint = document.createElement("p");
@@ -58,7 +59,7 @@ void (async () => {
         method:"POST", redirect:"error", signal:controller.signal,
         headers:{"Content-Type":"text/plain; charset=UTF-8", "Accept":"image/webp"}, body
       });
-      if (!response.ok) throw new Error(`Samsung returned HTTP ${response.status}.`);
+      if (!response.ok) throw new StoreError(`三星服务暂时不可用（HTTP ${response.status}），请稍后重试。`);
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8", {fatal:true});
       let text = "", size = 0;
@@ -69,7 +70,7 @@ void (async () => {
           size += value.byteLength;
           if (size > 2000000) {
             await reader.cancel();
-            throw new Error("Samsung returned too much data.");
+            throw new StoreError("三星商店返回的信息超出限制，请稍后重试。");
           }
           text += decoder.decode(value, {stream:true});
         }
@@ -77,21 +78,21 @@ void (async () => {
       } finally {
         reader.releaseLock();
       }
-      if (/<!DOCTYPE|<!ENTITY/.test(text)) throw new Error("Samsung returned invalid data.");
+      if (/<!DOCTYPE|<!ENTITY/.test(text)) throw new StoreError("三星商店返回的信息格式不正确，请稍后重试。");
       const doc = new DOMParser().parseFromString(text, "application/xml");
-      if (doc.querySelector("parsererror") || doc.documentElement.nodeName !== "SamsungProtocol") throw new Error("Samsung returned invalid data.");
+      if (doc.querySelector("parsererror") || doc.documentElement.nodeName !== "SamsungProtocol") throw new StoreError("三星商店返回的信息格式不正确，请稍后重试。");
       const fields = Object.create(null);
       for (const node of doc.querySelectorAll("*")) {
         if (node.children.length) continue;
         const key = node.getAttribute("name") || node.nodeName;
-        if (Object.hasOwn(fields, key)) throw new Error("Samsung returned conflicting data.");
+        if (Object.hasOwn(fields, key)) throw new StoreError("三星商店返回的信息存在冲突，请稍后重试。");
         fields[key] = node.textContent.trim();
         if (key === "errorString" && node.hasAttribute("errorCode")) {
-          if (Object.hasOwn(fields, "errorCode")) throw new Error("Samsung returned conflicting data.");
+          if (Object.hasOwn(fields, "errorCode")) throw new StoreError("三星商店返回的信息存在冲突，请稍后重试。");
           fields.errorCode = node.getAttribute("errorCode");
         }
       }
-      if (fields.errorCode !== "0" || !["", "success"].includes((fields.errorString || "").toLowerCase())) throw new Error("Samsung did not approve this request. Please try again later.");
+      if (fields.errorCode !== "0" || !["", "success"].includes((fields.errorString || "").toLowerCase())) throw new StoreError("三星商店未批准此请求，请稍后重试。");
       return fields;
     } finally {
       clearTimeout(timer);
@@ -104,32 +105,32 @@ void (async () => {
       stduk:identity, predeployed:"0", unifiedPaymentYN:"Y", lkAppIncludedYN:"Y",
       betaTestYN:"N", minorYN:"N", stateCode:""
     });
-    if (metadata.GUID !== packageName || !/^\d{1,30}$/.test(metadata.productID || "") || !metadata.version || !positive(metadata.versionCode) || (metadata.realContentsSize && !positive(metadata.realContentsSize))) throw new Error("Samsung returned incomplete app information.");
-    if (metadata.needToLogin === "1") throw new Error("This version requires a Samsung account. This script cannot authorize it.");
-    if (metadata.needToLogin !== "0" || metadata.installableYN !== "Y") throw new Error("Samsung has not made this version installable for this request.");
-    title.textContent = metadata.productName || "Samsung Assistant";
-    info.textContent = `Version: ${metadata.version}`;
-    status.textContent = "Getting a fresh download link…";
+    if (metadata.GUID !== packageName || !/^\d{1,30}$/.test(metadata.productID || "") || !metadata.version || !positive(metadata.versionCode) || (metadata.realContentsSize && !positive(metadata.realContentsSize))) throw new StoreError("三星商店返回的应用信息不完整，请稍后重试。");
+    if (metadata.needToLogin === "1") throw new StoreError("此版本需要登录三星账户，当前书签无法获取下载链接。");
+    if (metadata.needToLogin !== "0" || metadata.installableYN !== "Y") throw new StoreError("当前无法获取此版本的下载链接。");
+    title.textContent = metadata.productName || "三星生活助手";
+    info.textContent = `版本：${metadata.version}`;
+    status.textContent = "正在获取下载链接，请稍候。";
     const grant = await request("downloadForRestore", "2316", {
       GUID:packageName, productID:metadata.productID, imei:identity, extuk:identity, stduk:identity,
       downloadType:"new", autoUpdateYN:"N", triggeredFrom:"DETAIL_PAGE", predeployed:"0",
       deepLinkSource:"", resumeYN:"N"
     });
-    if (grant.productID !== metadata.productID || (Object.hasOwn(grant, "GUID") && grant.GUID !== packageName) || (Object.hasOwn(grant, "version") && grant.version !== metadata.version) || (Object.hasOwn(grant, "versionCode") && positive(grant.versionCode) !== positive(metadata.versionCode))) throw new Error("The store version changed. Run the bookmark again.");
-    if (!positive(grant.contentsSize) || (metadata.realContentsSize && positive(grant.contentsSize) !== positive(metadata.realContentsSize))) throw new Error("Samsung returned mismatched download information.");
-    if (!grant.downLoadURI) throw new Error("Samsung returned incomplete download information.");
+    if (grant.productID !== metadata.productID || (Object.hasOwn(grant, "GUID") && grant.GUID !== packageName) || (Object.hasOwn(grant, "version") && grant.version !== metadata.version) || (Object.hasOwn(grant, "versionCode") && positive(grant.versionCode) !== positive(metadata.versionCode))) throw new StoreError("下载信息与查询到的版本不一致，请再次运行此书签。");
+    if (!positive(grant.contentsSize) || (metadata.realContentsSize && positive(grant.contentsSize) !== positive(metadata.realContentsSize))) throw new StoreError("三星商店返回的下载信息不匹配，请再次运行此书签。");
+    if (!grant.downLoadURI) throw new StoreError("三星商店返回的下载信息不完整，请稍后重试。");
     const url = new URL(grant.downLoadURI);
     const host = url.hostname;
-    if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") || url.hash || /[\x00-\x20\s\\]/.test(grant.downLoadURI) || !(host === "galaxystore.samsung.com" || ["samsungapps.com", "galaxyappstore.com"].some(suffix => host === suffix || host.endsWith("." + suffix)))) throw new Error("Samsung returned an invalid download address.");
+    if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") || url.hash || /[\x00-\x20\s\\]/.test(grant.downLoadURI) || !(host === "galaxystore.samsung.com" || ["samsungapps.com", "galaxyappstore.com"].some(suffix => host === suffix || host.endsWith("." + suffix)))) throw new StoreError("三星商店返回的下载地址无效，请稍后重试。");
     info.textContent += ` · ${(Number(grant.contentsSize) / 1000000).toFixed(2)} MB`;
     action.href = url.href;
     action.hidden = false;
     action.style.display = "inline-block";
-    status.textContent = "Ready. Tap Download APK to save the file.";
+    status.textContent = "下载链接已获取，请点击「下载」保存文件。";
     status.dataset.state = "ready";
-    hint.textContent = "The link usually lasts about 10 minutes. If it expires, run this bookmark again.";
+    hint.textContent = "下载链接有效期约为 10 分钟，失效后请再次运行此书签。";
   } catch (error) {
     status.dataset.state = "error";
-    status.textContent = error.name === "AbortError" ? "The request timed out. Run the bookmark again." : error instanceof TypeError ? "The Samsung request could not be completed. Check your connection and try again." : error.message;
+    status.textContent = error.name === "AbortError" ? "请求超时，请再次运行此书签。" : error instanceof StoreError ? error.message : "暂时无法完成请求，请稍后重试。";
   }
 })();
