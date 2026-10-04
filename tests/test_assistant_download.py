@@ -12,9 +12,7 @@ from galaxy_store import OdsProfile
 from tests.test_galaxy_store import metadata, ods, release
 
 
-SCRIPT = (
-    Path(__file__).resolve().parents[1] / "standalone/samsung-assistant/download.py"
-)
+SCRIPT = Path(__file__).resolve().parents[1] / "samsung-assistant/download.py"
 
 
 def test_script_is_independent_of_bot_and_external_dependencies():
