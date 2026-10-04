@@ -159,7 +159,7 @@ function gmBridge(overrides) {
       assert.match(requests[1].body, /name="deepLinkSource">N</);
       assert.doesNotMatch(requests[1].body, /name="(?:versionCode|loadType)"/);
       const info = await page.locator("#apkbot-download p:nth-of-type(2)").textContent();
-      assert.match(info, /版本：9\.4\.02\.7 · 0\.00 MB · 🇨🇳\n\n包名：/);
+      assert.match(info, /版本：9\.4\.02\.7 · 0\.00 MB · 🇨🇳\n\n应用包名：/);
       assert.doesNotMatch(info, /文件大小：|版本代码：/);
       const order = await page.locator("#apkbot-download div button, #apkbot-download div a").allTextContents();
       assert.deepEqual(order, ["刷新", "下载"]);
@@ -229,7 +229,7 @@ function gmBridge(overrides) {
       assert.equal(requests.length, 3);
       assert.match(requests[2].body, /name="guid">com\.example\.other</);
       assert.equal(await page.locator("#apkbot-download h2").textContent(), "com.example.other");
-      assert.equal(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), "包名：com.example.other");
+      assert.equal(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), "应用包名：com.example.other");
       assert.equal(await page.locator("#apkbot-download > p:last-child").textContent(), "");
       assert.equal(await page.locator("#apkbot-download button").isVisible(), false);
       assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), "#");
