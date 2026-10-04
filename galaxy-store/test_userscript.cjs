@@ -159,7 +159,7 @@ function gmBridge(overrides) {
       assert.match(requests[1].body, /name="deepLinkSource">N</);
       assert.doesNotMatch(requests[1].body, /name="(?:versionCode|loadType)"/);
       const info = await page.locator("#apkbot-download p:nth-of-type(2)").textContent();
-      assert.match(info, /版本：9\.4\.02\.7 · 0\.00 MB · 🇨🇳\n\n应用包名：/);
+      assert.match(info, /版本：9\.4\.02\.7\n大小：0\.00 MB · 🇨🇳\n包名：/);
       assert.doesNotMatch(info, /文件大小：|版本代码：/);
       const order = await page.locator("#apkbot-download div button, #apkbot-download div a").allTextContents();
       assert.deepEqual(order, ["刷新", "下载"]);
@@ -229,7 +229,7 @@ function gmBridge(overrides) {
       assert.equal(requests.length, 3);
       assert.match(requests[2].body, /name="guid">com\.example\.other</);
       assert.equal(await page.locator("#apkbot-download h2").textContent(), "com.example.other");
-      assert.equal(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), "应用包名：com.example.other");
+      assert.equal(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), "包名：com.example.other");
       assert.equal(await page.locator("#apkbot-download > p:last-child").textContent(), "");
       assert.equal(await page.locator("#apkbot-download button").isVisible(), false);
       assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), "#");
@@ -293,7 +293,7 @@ function gmBridge(overrides) {
     };
     await run("matching detail sandwich displays the store date without an update log", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
       assert.deepEqual(requests.extra.map(r => r.url.searchParams.get("reqId")), ["2300", "2290", "2291", "2290"]);
-      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间：2026-08-25/);
+      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /版本：9\.4\.02\.7 · 2026-08-25\n大小：/);
       assert.equal(await page.locator("#apkbot-download details").count(), 0);
       assert.equal(await page.locator("#apkbot-download h2 a").getAttribute("href"), `https://galaxystore.samsung.com/detail/${packageName}`);
     }, {details:detailResponses});
@@ -301,13 +301,13 @@ function gmBridge(overrides) {
       await page.locator("#apkbot-download button").click();
       await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').textContent === "下载链接已更新。");
       assert.equal(requests.extra.filter(r => r.url.searchParams.get("reqId") === "2300").length, 1);
-      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间：2026-08-25/);
+      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /版本：9\.4\.02\.7 · 2026-08-25\n大小：/);
     }, {details:detailResponses});
     await run("refresh hides a date that the store no longer supplies", [xml(metadata), xml(grant), xml(metadata), xml(grant)], "ready", async page => {
-      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间：2026-08-25/);
+      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /版本：9\.4\.02\.7 · 2026-08-25\n大小：/);
       await page.locator("#apkbot-download button").click();
       await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').textContent === "下载链接已更新。");
-      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /\d{4}-\d{2}-\d{2}/);
     }, {details:{...detailResponses, "2291":(_, count) => ods({...overviewDetails, lastUpdateDate:count === 1 ? "2026;08;25;" : ""}, "2291")}});
     for (const endpoint of ["http://cn-ms.galaxyappstore.com/ods.as", "https://evil.example/ods.as", "https://cn-ms.galaxyappstore.com.example.org/ods.as", "https://cn-ms.galaxyappstore.com/other", "https://cn-ms.galaxyappstore.com/ods.as?secret=1", "https://user@cn-ms.galaxyappstore.com/ods.as", "https://cn-ms.galaxyappstore.com:8443/ods.as"]) {
       await run("discovery only upgrades or retains a fixed trusted region endpoint", [xml(metadata), xml(grant)], "ready", (_, requests) => {
@@ -318,21 +318,21 @@ function gmBridge(overrides) {
     await run("failed endpoint discovery uses the fixed catalog without another discovery loop", [xml(metadata), xml(grant)], "ready", null, {discovery:{status:503, body:"unavailable"}});
     for (const date of ["", "2026;02;30;", "2026-08-25", "2026;08;25;extra"]) {
       await run("missing or invalid store dates hide the date field", [xml(metadata), xml(grant)], "ready", async page => {
-        assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
+        assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /\d{4}-\d{2}-\d{2}/);
       }, {details:{...detailResponses, "2291":ods({...overviewDetails, lastUpdateDate:date}, "2291")}});
     }
     await run("overview with a different version is not attached to the download", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
-      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /\d{4}-\d{2}-\d{2}/);
       assert.equal(requests.extra.filter(r => r.url.searchParams.get("reqId") === "2290").length, 1);
     }, {details:{...detailResponses, "2291":ods({...overviewDetails, version:"10.0"}, "2291")}});
     await run("a version change across the overview discards its date", [xml(metadata), xml(grant)], "ready", async page => {
-      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /\d{4}-\d{2}-\d{2}/);
     }, {details:{...detailResponses, "2290":(_, count) => ods(count === 1 ? mainDetails : {...mainDetails, versionCode:"999999999"}, "2290")}});
     await run("critical overview duplicates are rejected while unrelated nested fields remain ignored", [xml(metadata), xml(grant)], "ready", async page => {
-      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /\d{4}-\d{2}-\d{2}/);
     }, {details:{...detailResponses, "2291":ods(overviewDetails, "2291").replace('</list>', '<value name="version">conflict</value></list>')}});
     await run("detail responses with another method ID do not contribute display information", [xml(metadata), xml(grant)], "ready", async page => {
-      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /\d{4}-\d{2}-\d{2}/);
     }, {details:{...detailResponses, "2291":ods(overviewDetails, "2290")}});
     await run("a partner response cannot replace primary authorization", [xml(metadata), ods(grant, "2801")], "error", (_, requests) => {
       assert.equal(requests.length, 2);
@@ -375,11 +375,11 @@ function gmBridge(overrides) {
       }
     });
     await run("a wrong product main response never contributes a date", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
-      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /\d{4}-\d{2}-\d{2}/);
       assert.equal(requests.extra.filter(r => r.url.searchParams.get("reqId") === "2291").length, 0);
     }, {details:{...detailResponses, "2290":ods({...mainDetails, productID:"99999"}, "2290")}});
     await run("overview size mismatch never attaches another binary's date", [xml(metadata), xml(grant)], "ready", async page => {
-      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /\d{4}-\d{2}-\d{2}/);
     }, {details:{...detailResponses, "2291":ods({...overviewDetails, realContentsSize:"999"}, "2291")}});
     await run("malformed protocol returnCode is not an authorization rejection", [xml(metadata), denied.replace('<SamsungProtocol>', '<SamsungProtocol><response returnCode="invalid">').replace('</SamsungProtocol>', '</response></SamsungProtocol>')], "error", (_, requests) => assert.equal(requests.length, 2));
     await run("a captured explicit region survives the site's same-document error page", [xml(metadata), xml(grant)], "ready", null, {html:'<script>history.replaceState(null,"","/error/4002")</script>'});

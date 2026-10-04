@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Galaxy Store APK 下载
 // @namespace    https://github.com/HotKids/apkbot
-// @version      1.2.3
+// @version      1.2.4
 // @description  在 Galaxy Store 应用详情页获取 Samsung APK 下载链接。
 // @match        https://galaxystore.samsung.com/detail/*
 // @match        https://apps.galaxyappstore.com/detail/*
@@ -57,7 +57,7 @@
   status.dataset.state = "idle";
   status.setAttribute("role", "status");
   const info = document.createElement("p");
-  info.textContent = `应用包名：${packageName}`;
+  info.textContent = `包名：${packageName}`;
   info.style.whiteSpace = "pre-line";
   const controls = document.createElement("div");
   const refresh = document.createElement("button");
@@ -328,7 +328,7 @@
     action.href = "#";
     titleLink.textContent = value;
     titleLink.href = "https://galaxystore.samsung.com/detail/" + value;
-    info.textContent = `应用包名：${value}`;
+    info.textContent = `包名：${value}`;
     hint.textContent = "";
     refresh.hidden = true;
   }
@@ -362,7 +362,7 @@
       try { result = await releaseDetails(result); } catch { checkPackage(); }
       checkPackage();
       titleLink.textContent = result.name;
-      info.textContent = `版本：${result.version} · ${(Number(result.size) / 1000000).toFixed(2)} MB · ${result.region === "CN" ? "🇨🇳" : "🇺🇸"}\n\n${result.updated ? `更新时间：${result.updated}\n` : ""}应用包名：${selectedPackage}`;
+      info.textContent = `版本：${result.version}${result.updated ? ` · ${result.updated}` : ""}\n大小：${(Number(result.size) / 1000000).toFixed(2)} MB · ${result.region === "CN" ? "🇨🇳" : "🇺🇸"}\n包名：${selectedPackage}`;
       action.href = result.url;
       action.textContent = "下载";
       status.dataset.state = "ready";
