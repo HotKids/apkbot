@@ -42,6 +42,10 @@ class TransportError(StoreError):
     pass
 
 
+class HttpStatusError(TransportError):
+    """An HTTP rejection, distinct from connection and redirect failures."""
+
+
 class InvalidResponse(StoreError):
     pass
 
@@ -220,6 +224,8 @@ def parse_stub(data, package, region):
 def check_ods_status(fields):
     status = fields.get("errorString", "")
     code = required(fields, "errorCode")
+    if not re.fullmatch(r"-?[0-9]{1,19}", code):
+        raise InvalidResponse("商店返回的信息无效，请稍后重试。")
     if code != "0" or status.casefold() not in {"", "success"}:
         if "login" in status.casefold() or "log in" in status.casefold():
             raise LoginRequired(
@@ -251,7 +257,7 @@ def parse_ods_metadata(data, package):
     )
 
 
-def parse_ods_grant(data, release):
+def parse_ods_grant(data, release, *, restore=False):
     fields = xml_fields(data, "SamsungProtocol")
     check_ods_status(fields)
     if required(fields, "productID") != release.product_id:
@@ -260,13 +266,13 @@ def parse_ods_grant(data, release):
         raise InvalidResponse("商店返回的下载信息与所选应用不一致，请重试。")
     # binaryArch describes CPU coverage (e.g. 32n64), not full vs. delta APKs.
     # Use the full download's downLoadURI and contentsSize below.
-    if "version" in fields and fields["version"] != release.version_name:
-        raise VersionDrift("商店版本已发生变化，请重试。")
-    if (
-        "versionCode" in fields
-        and positive(fields, "versionCode") != release.version_code
-    ):
-        raise VersionDrift("商店版本已发生变化，请重试。")
+    # 2311 binds the grant to the selected version; 2316 may omit these fields.
+    if not restore or "version" in fields:
+        if required(fields, "version") != release.version_name:
+            raise VersionDrift("商店版本已发生变化，请重试。")
+    if not restore or "versionCode" in fields:
+        if positive(fields, "versionCode") != release.version_code:
+            raise VersionDrift("商店版本已发生变化，请重试。")
     size = positive(fields, "contentsSize")
     if release.size is not None and size != release.size:
         raise VersionDrift("下载文件大小与所选版本不一致，请重试。")
@@ -344,24 +350,26 @@ class OdsProfile:
             ),
         )
 
-    def download(self, release):
-        return self.envelope(
-            "downloadForRestore",
-            "2316",
-            dict(
-                GUID=release.package,
-                productID=release.product_id,
-                imei=self.identity,
-                extuk=self.identity,
-                stduk=self.identity,
-                downloadType="new",
-                autoUpdateYN="N",
-                triggeredFrom="DETAIL_PAGE",
-                predeployed="0",
-                deepLinkSource="",
-                resumeYN="N",
-            ),
+    def download(self, release, *, restore=False):
+        params = dict(
+            GUID=release.package,
+            productID=release.product_id,
+            imei=self.identity,
+            extuk=self.identity,
+            stduk=self.identity,
+            autoUpdateYN="N",
+            predeployed="0",
+            resumeYN="N",
         )
+        if restore:
+            params.update(
+                downloadType="new", triggeredFrom="DETAIL_PAGE", deepLinkSource=""
+            )
+            return self.envelope("downloadForRestore", "2316", params)
+        # versionCode/loadType describe an installed base; omitting them asks
+        # for a full APK. Samsung's 2311 parameter is spelled dowloadType.
+        params.update(dowloadType="new", deepLinkSource="N")
+        return self.envelope("downloadEx2", "2311", params)
 
 
 def match_cn_details(response, release):

@@ -53,6 +53,19 @@ def release(**changes):
     )
 
 
+def grant(**changes):
+    fields = dict(
+        GUID="com.example.app",
+        productID="00001",
+        version="01.02.3",
+        versionCode="123",
+        contentsSize="42",
+        downLoadURI="https://download.samsungapps.com/full.apk",
+    )
+    fields.update(changes)
+    return ods({key: value for key, value in fields.items() if value is not None})
+
+
 def stub(message="success", code="1", **changes):
     fields = dict(
         resultCode=code,
@@ -205,6 +218,8 @@ def test_nova_authorization_failure_is_not_absence():
 def test_ods_grant_case_and_product_binding():
     fields = dict(
         productID="00001",
+        version="01.02.3",
+        versionCode="123",
         downLoadURI="https://download.samsungapps.com/a.apk",
         contentsSize="42",
         binaryArch="64",
@@ -231,6 +246,8 @@ def test_ods_grant_does_not_confuse_architecture_with_full_apk(arch):
     )
     fields = dict(
         productID=selected.product_id,
+        version=selected.version_name,
+        versionCode=selected.version_code,
         contentsSize=selected.size,
         downLoadURI="https://cdnet-dn.galaxyappstore.com/full.apk",
         deltaContentsSize="42",
@@ -246,11 +263,32 @@ def test_ods_grant_does_not_confuse_architecture_with_full_apk(arch):
         parse_ods_grant(ods(dict(fields, contentsSize=42)), selected)
 
 
+@pytest.mark.parametrize("field", ["version", "versionCode"])
+def test_primary_ods_grant_requires_version_binding(field):
+    root = ET.fromstring(grant())
+    root.remove(root.find(f"value[@name='{field}']"))
+    with pytest.raises(InvalidResponse):
+        parse_ods_grant(ET.tostring(root), release())
+
+
+def test_restore_ods_grant_can_omit_version_binding():
+    fields = dict(
+        productID="00001",
+        contentsSize="42",
+        downLoadURI="https://download.samsungapps.com/full.apk",
+    )
+    assert parse_ods_grant(ods(fields), release(), restore=True).release == release()
+    for change in (dict(version="2.0"), dict(versionCode="124")):
+        with pytest.raises(VersionDrift):
+            parse_ods_grant(ods(dict(fields, **change)), release(), restore=True)
+
+
 def test_ods_profile_reuses_only_synthetic_identity_and_correct_guid_case():
     profile = OdsProfile()
     meta = ET.fromstring(profile.metadata("com.example.app"))
     auth = ET.fromstring(profile.download(release()))
-    for root in (meta, auth):
+    restore = ET.fromstring(profile.download(release(), restore=True))
+    for root in (meta, auth, restore):
         request = root.find("request")
         assert int(request.attrib["numParam"]) == len(request)
         values = {n.attrib["name"]: n.text for n in request}
@@ -258,7 +296,21 @@ def test_ods_profile_reuses_only_synthetic_identity_and_correct_guid_case():
     assert meta.find("request/param[@name='guid']").text == "com.example.app"
     assert auth.find("request/param[@name='GUID']").text == "com.example.app"
     assert meta.find("request").attrib["id"] == "2298"
-    assert auth.find("request").attrib["id"] == "2316"
+    assert auth.find("request").attrib["id"] == "2311"
+    assert auth.find("request").attrib["name"] == "downloadEx2"
+    params = {n.attrib["name"]: n.text for n in auth.find("request")}
+    assert params["dowloadType"] == "new"
+    assert params["deepLinkSource"] == "N"
+    assert params["productID"] == "00001"
+    assert params["autoUpdateYN"] == params["resumeYN"] == "N"
+    assert params["predeployed"] == "0"
+    assert not {"versionCode", "loadType", "downloadType"} & params.keys()
+    assert restore.find("request").attrib["id"] == "2316"
+    assert restore.find("request").attrib["name"] == "downloadForRestore"
+    params = {n.attrib["name"]: n.text for n in restore.find("request")}
+    assert params["downloadType"] == "new"
+    assert params["triggeredFrom"] == "DETAIL_PAGE"
+    assert not {"versionCode", "loadType", "dowloadType"} & params.keys()
 
 
 def test_cn_details_exact_match_never_changes_apk_region():

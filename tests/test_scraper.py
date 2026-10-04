@@ -17,7 +17,7 @@ from galaxy_store import (
     TransportError,
     VersionDrift,
 )
-from tests.test_galaxy_store import metadata, ods, release, stub
+from tests.test_galaxy_store import grant, metadata, ods, release, stub
 
 
 class Response:
@@ -169,6 +169,8 @@ def test_download_link_retries_cn_when_us_authorization_fails(region):
             ods(
                 dict(
                     productID="00001",
+                    version="01.02.3",
+                    versionCode="123",
                     binaryArch="32n64",
                     contentsSize=42,
                     downLoadURI=url,
@@ -186,7 +188,7 @@ def test_download_link_retries_cn_when_us_authorization_fails(region):
         assert grant.release.region == "CN" and grant.url == url
         assert http.request.call_count == 3
         assert "reqId=2298" in http.request.call_args_list[1].args[1]
-        assert "reqId=2316" in http.request.call_args_list[2].args[1]
+        assert "reqId=2311" in http.request.call_args_list[2].args[1]
 
 
 def test_download_link_reuses_the_us_stub_answer():
@@ -216,10 +218,108 @@ def test_download_link_does_not_loop_when_both_regions_fail():
         Response(stub("Service error", "0")),
         Response(metadata()),
         Response(ods(error="Service error", code="-1")),
+        Response(ods(error="Service error", code="-1")),
     )
     with pytest.raises(ServiceError):
         scraper.GalaxyStore(http).download_link(AppRequest("com.example.app"))
-    assert http.request.call_count == 3
+    assert http.request.call_count == 4
+
+
+def test_cn_download_link_uses_metadata_then_stateless_full_package_authorization():
+    http = session(Response(metadata()), Response(grant()))
+    selected = scraper.GalaxyStore(http).download_link(AppRequest("com.example.app", "CN"))
+    assert selected.release == release()
+    assert selected.size == 42
+    assert selected.url == "https://download.samsungapps.com/full.apk"
+    assert http.request.call_count == 2
+    assert all(call.args[0] == "POST" for call in http.request.call_args_list)
+    assert "reqId=2298" in http.request.call_args_list[0].args[1]
+    assert "reqId=2311" in http.request.call_args_list[1].args[1]
+
+
+@pytest.mark.parametrize("status", [400, 403, 500])
+def test_cn_authorization_uses_restore_after_primary_http_rejection(status):
+    http = session(
+        Response(status=status),
+        Response(grant(version=None, versionCode=None)),
+    )
+    assert scraper.GalaxyStore(http).authorize(release()).release == release()
+    assert http.request.call_count == 2
+    assert "reqId=2311" in http.request.call_args_list[0].args[1]
+    assert "reqId=2316" in http.request.call_args_list[1].args[1]
+
+
+@pytest.mark.parametrize("error", ["Service error", "Login required"])
+def test_cn_authorization_uses_restore_after_primary_api_rejection(error):
+    http = session(
+        Response(ods(error=error, code="-1")),
+        Response(grant(version=None, versionCode=None)),
+    )
+    assert scraper.GalaxyStore(http).authorize(release()).release == release()
+    assert http.request.call_count == 2
+    assert "reqId=2311" in http.request.call_args_list[0].args[1]
+    assert "reqId=2316" in http.request.call_args_list[1].args[1]
+
+
+@pytest.mark.parametrize(
+    "payload, exception",
+    [
+        (b"malformed", InvalidResponse),
+        (b"<SamsungProtocol/>", InvalidResponse),
+        (ods(error="Service error", code="invalid"), InvalidResponse),
+        (grant(productID="00002"), InvalidResponse),
+        (grant(GUID="com.other.app"), InvalidResponse),
+        (grant(version=None), InvalidResponse),
+        (grant(versionCode=None), InvalidResponse),
+        (grant(version="2.0"), VersionDrift),
+        (grant(versionCode="124"), VersionDrift),
+        (grant(contentsSize="43"), VersionDrift),
+        (grant(contentsSize="0"), InvalidResponse),
+        (grant(downLoadURI=None), InvalidResponse),
+        (grant(downLoadURI="https://evil.test/private"), InvalidResponse),
+        (grant(downLoadURI="https://download.samsungapps.com/"), InvalidResponse),
+    ],
+)
+def test_cn_primary_invalid_grant_does_not_retry_restore(payload, exception):
+    http = session(Response(payload))
+    with pytest.raises(exception):
+        scraper.GalaxyStore(http).authorize(release())
+    assert http.request.call_count == 1
+    assert "reqId=2311" in http.request.call_args.args[1]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        requests.Timeout("synthetic"),
+        Response(status=307, headers={"Location": scraper.ODS_URL}),
+        Response(status=304),
+        Response(status=204),
+    ],
+)
+def test_cn_primary_network_or_redirect_failure_does_not_retry_restore(failure):
+    http = session(failure)
+    with pytest.raises(TransportError):
+        scraper.GalaxyStore(http).authorize(release())
+    assert http.request.call_count == 1
+
+
+@pytest.mark.parametrize("payload", [grant(version="2.0"), grant(versionCode="124")])
+def test_cn_restore_present_versions_must_match_selected_release(payload):
+    http = session(Response(status=403), Response(payload))
+    with pytest.raises(VersionDrift):
+        scraper.GalaxyStore(http).authorize(release())
+    assert http.request.call_count == 2
+
+
+def test_cn_authorization_does_not_loop_after_restore_rejection():
+    http = session(
+        Response(ods(error="Service error", code="-1")),
+        Response(ods(error="Login required", code="-1")),
+    )
+    with pytest.raises(LoginRequired):
+        scraper.GalaxyStore(http).authorize(release())
+    assert http.request.call_count == 2
 
 
 def test_login_and_installability_block_authorization(monkeypatch):

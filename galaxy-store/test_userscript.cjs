@@ -9,6 +9,7 @@ assert.match(source, /^\/\/ ==UserScript==/);
 assert.match(source, /@grant\s+GM_xmlhttpRequest/);
 assert.match(source, /@run-at\s+document-start/);
 assert.match(source, /@match\s+https:\/\/apps\.galaxyappstore\.com\/detail\/\*/);
+assert.doesNotMatch(source, /GM_addElement|__apkbotStoreGuard|samsungapps:/);
 assert.deepEqual([...source.matchAll(/@connect\s+(\S+)/g)].map(match => match[1]).sort(), ["cn-ms.galaxyappstore.com", "vas.samsungapps.com"]);
 
 const packageName = "com.samsung.android.app.sreminder";
@@ -16,28 +17,24 @@ const metadata = {
   GUID:packageName, productID:"12345", productName:"三星生活助手",
   version:"9.4.02.7", versionCode:"940207000", realContentsSize:"1234", needToLogin:"0", installableYN:"Y"
 };
-const grant = {productID:"12345", contentsSize:"1234", downLoadURI:"https://download.samsungapps.com/fixture.apk"};
+const grant = {productID:"12345", version:metadata.version, versionCode:metadata.versionCode, contentsSize:"1234", downLoadURI:"https://download.samsungapps.com/fixture.apk"};
 const us = {resultCode:"1", appId:packageName, productId:"12345", productName:"US app", versionName:"1.0", versionCode:"100", contentSize:"1234", downloadURI:grant.downLoadURI};
 const escapeXml = text => String(text).replace(/[&<>"']/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&apos;"}[c]));
 const xml = fields => `<SamsungProtocol><response><errorString errorCode="0">Success</errorString>${Object.entries(fields).map(([key, value]) => `<param name="${key}">${escapeXml(value)}</param>`).join("")}</response></SamsungProtocol>`;
 const stub = fields => `<result>${Object.entries(fields).map(([key, value]) => `<${key}>${escapeXml(value)}</${key}>`).join("")}</result>`;
 const stubDenied = stub({resultCode:"0", resultMsg:"Application is not approved as stub"});
 
-function gmBridge() {
-  window.GM_addElement = (tag, attributes) => {
-    const element = document.createElement(tag);
-    Object.assign(element, attributes);
-    (document.head || document.documentElement).append(element);
-    return element;
-  };
+function gmBridge(overrides) {
+  let index = 0;
   window.GM_xmlhttpRequest = options => {
+    const responseOverride = overrides?.[index++];
     const controller = new AbortController();
     const timer = setTimeout(() => options.ontimeout(), options.timeout);
     fetch(options.url, {method:options.method, body:options.data, headers:options.headers, signal:controller.signal, redirect:options.redirect})
       .then(async response => {
         const bytes = await response.arrayBuffer();
         options.onprogress({loaded:bytes.byteLength, total:bytes.byteLength});
-        options.onload({status:response.status, finalUrl:response.url, response:bytes});
+        options.onload({status:response.status, finalUrl:response.url, response:bytes, ...responseOverride});
       }).catch(error => error.name === "AbortError" ? options.onabort() : options.onerror())
       .finally(() => clearTimeout(timer));
     return {abort:() => controller.abort()};
@@ -54,7 +51,7 @@ function gmBridge() {
       let apkRequests = 0;
       page.on("download", download => downloads.push(download));
       if (options.setup) await options.setup(page);
-      await page.addInitScript(gmBridge);
+      await page.addInitScript(gmBridge, options.gmResponseOverrides);
       await page.addInitScript({content:source});
       await page.route("**/*", async route => {
         const request = route.request();
@@ -75,7 +72,7 @@ function gmBridge() {
           assert.equal(url.searchParams.get("csc"), "XAA");
         } else {
           assert.equal(request.method(), "POST");
-          assert.ok(["2298", "2316"].includes(url.searchParams.get("reqId")));
+          assert.ok(["2298", "2311", "2316"].includes(url.searchParams.get("reqId")));
           assert.match(request.postData(), /mcc="460" mnc="00" csc="CHC"/);
         }
         requests.push({url, body:request.postData()});
@@ -94,7 +91,7 @@ function gmBridge() {
         if (options.duringRequest) await options.duringRequest(page);
         await page.waitForFunction(() => ["ready", "error"].includes(document.querySelector("#apkbot-download [data-state]")?.dataset.state));
         assert.equal(await page.locator("[data-state]").getAttribute("data-state"), expected, name);
-        assert.equal(await page.locator("#apkbot-download a").textContent(), "下载 APK");
+        assert.equal(await page.locator("#apkbot-download a").textContent(), "下载");
         assert.equal(await page.locator("#apkbot-download a").getAttribute("aria-disabled"), null);
         if (downloadEvent) {
           const download = await downloadEvent;
@@ -119,8 +116,78 @@ function gmBridge() {
       const identities = requests.map(request => /logId="([a-f0-9]{16})"/.exec(request.body)[1]);
       assert.equal(identities[0], identities[1]);
       assert.match(requests[0].body, /name="getDownloadInfo" id="2298" numParam="12"/);
-      assert.match(requests[1].body, /name="downloadForRestore" id="2316" numParam="11"/);
+      assert.match(requests[1].body, /name="downloadEx2" id="2311" numParam="10"/);
+      assert.match(requests[1].body, /name="dowloadType">new</);
+      assert.match(requests[1].body, /name="deepLinkSource">N</);
+      assert.doesNotMatch(requests[1].body, /name="(?:versionCode|loadType)"/);
       assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /9\.4\.02\.7 · 🇨🇳/);
+      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /文件大小：0\.00 MB\n版本代码：940207000\n包名：/);
+      const order = await page.locator("#apkbot-download button, #apkbot-download a").allTextContents();
+      assert.deepEqual(order, ["刷新", "下载"]);
+    });
+    const denied = '<SamsungProtocol><errorString errorCode="4002">Denied</errorString></SamsungProtocol>';
+    const legacyGrant = {...grant};
+    delete legacyGrant.version;
+    delete legacyGrant.versionCode;
+    for (const rejection of [denied, {status:503, body:"unavailable"}]) {
+      await run("HTTP or API rejection retains one restore authorization", [xml(metadata), rejection, xml(legacyGrant)], "ready", (_, requests) => {
+        assert.deepEqual(requests.map(r => r.url.searchParams.get("reqId")), ["2298", "2311", "2316"]);
+        assert.match(requests[2].body, /name="downloadForRestore" id="2316" numParam="11"/);
+        assert.match(requests[2].body, /name="downloadType">new</);
+        assert.match(requests[2].body, /name="triggeredFrom">DETAIL_PAGE</);
+      });
+    }
+    for (const field of ["version", "versionCode"]) {
+      const incomplete = {...grant};
+      delete incomplete[field];
+      await run(`primary authorization requires ${field} without another grant`, [xml(metadata), xml(incomplete)], "error", (_, requests) => assert.equal(requests.length, 2));
+    }
+    for (const override of [{status:0}, {status:302}, {status:204}, {status:403, finalUrl:"https://example.org/redirect"}]) {
+      await run("non-HTTP responses and redirects never authorize through restore", [xml(metadata), xml(grant), xml(legacyGrant)], "error", (_, requests) => assert.equal(requests.length, 2), {gmResponseOverrides:[{}, override]});
+    }
+    for (const malformed of ['<html>error</html>', '<SamsungProtocol><errorString errorCode="invalid">Denied</errorString></SamsungProtocol>']) {
+      await run("malformed authorization never invokes restore", [xml(metadata), malformed], "error", (_, requests) => assert.equal(requests.length, 2));
+    }
+    await run("refresh updates one card without starting another download", [xml(metadata), xml(grant), xml(metadata), xml(grant)], "ready", async (page, requests) => {
+      await page.locator("#apkbot-download button").click();
+      await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').textContent === "下载链接已更新。");
+      assert.equal(requests.length, 4);
+      assert.equal(await page.locator("#apkbot-download").count(), 1);
+      assert.equal(await page.locator("#apkbot-download a").getAttribute("href"), grant.downLoadURI);
+      assert.equal(await page.locator("#apkbot-download p:last-child").textContent(), "下载链接有效期约为 10 分钟，失效后请点击「刷新」。");
+    });
+    await run("failed refresh preserves the previous card and direct URL", [xml(metadata), xml(grant), xml({...metadata, version:"10.0", versionCode:"1000000000", productName:"New app name"}), denied, denied], "ready", async (page, requests) => {
+      await page.locator("#apkbot-download button").click();
+      await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').textContent.startsWith("下载链接更新失败："));
+      assert.equal(requests.length, 5);
+      assert.equal(await page.locator("#apkbot-download").count(), 1);
+      assert.equal(await page.locator("#apkbot-download h2").textContent(), "三星生活助手");
+      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /版本：9\.4\.02\.7/);
+      assert.equal(await page.locator("#apkbot-download a").getAttribute("href"), grant.downLoadURI);
+      assert.equal(await page.locator("[data-state]").getAttribute("data-state"), "ready");
+    });
+    await run("switching apps clears old information when the new query fails", [xml(metadata), xml(grant), xml({...metadata, GUID:"com.example.other", needToLogin:"1"})], "ready", async (page, requests) => {
+      await page.evaluate(() => history.pushState(null, "", "/detail/com.example.other"));
+      await page.locator("#apkbot-download a").click();
+      await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').dataset.state === "error");
+      assert.equal(requests.length, 3);
+      assert.match(requests[2].body, /name="guid">com\.example\.other</);
+      assert.equal(await page.locator("#apkbot-download h2").textContent(), "com.example.other");
+      assert.equal(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), "包名：com.example.other");
+      assert.equal(await page.locator("#apkbot-download p:last-child").textContent(), "");
+      assert.equal(await page.locator("#apkbot-download button").isVisible(), false);
+      assert.equal(await page.locator("#apkbot-download a").getAttribute("href"), "#");
+    });
+    await run("switching apps stops restore after primary authorization rejection", [xml(metadata), denied, xml(legacyGrant)], "error", (_, requests) => assert.equal(requests.length, 2), {
+      delay:100,
+      duringRequest:async page => {
+        await page.waitForRequest(request => new URL(request.url()).searchParams.get("reqId") === "2311");
+        await page.evaluate(() => history.pushState(null, "", "/detail/com.example.other"));
+      }
+    });
+    await run("switching apps stops AUTO before querying another catalog", [stubDenied, xml(metadata), xml(grant)], "error", (_, requests) => assert.equal(requests.length, 1), {
+      query:"", delay:100,
+      duringRequest:page => page.evaluate(() => history.pushState(null, "", "/detail/com.example.other"))
     });
     await run("AUTO tries US then CN when the catalog is restricted", [stubDenied, xml(metadata), xml(grant)], "ready", (_, requests) => assert.equal(requests.length, 3), {query:""});
     await run("AUTO keeps an available US full package", [stub(us)], "ready", async (page, requests) => {
@@ -135,20 +202,13 @@ function gmBridge() {
       assert.equal(await page.locator("#apkbot-download h2 b").count(), 0);
     }, {packageName:otherPackage, host:"apps.galaxyappstore.com", query:"?cntyCd=CN"});
     await run("the captured package remains usable after a same-document error route", [xml(metadata), xml(grant)], "ready", null, {html:'<script>history.replaceState(null,"","/error/4002?cntyCd=CHN")</script>'});
-    await run("store links and popup launches are blocked while APK download works", [xml(metadata), xml(grant)], "ready", async page => {
-      assert.equal(await page.evaluate(() => window.storePopup), null);
-      await page.locator("#store-link").click();
-      assert.equal(await page.evaluate(() => window.storeClick), undefined);
-      await page.evaluate(() => document.querySelector("#store-link").click());
-      assert.equal(await page.evaluate(() => window.storeClick), undefined);
-      assert.equal(new URL(page.url()).pathname, `/detail/${packageName}`);
-    }, {html:'<a id="store-link" href="samsungapps://productdetail/com.samsung.android.app.sreminder" onclick="window.storeClick=true">打开商店</a><script>window.storePopup=window.open("intent://productdetail/com.example.app#Intent;scheme=samsungapps;package=com.sec.android.app.samsungapps;end")</script>'});
     await run("login stops before authorization", [xml({...metadata, needToLogin:"1"})], "error", (_, requests) => assert.equal(requests.length, 1));
-    await run("authorization rejection leaves no URL", [xml(metadata), '<SamsungProtocol><errorString errorCode="1">Denied</errorString></SamsungProtocol>'], "error");
+    await run("authorization rejection leaves no URL and never loops", [xml(metadata), denied, denied], "error", (_, requests) => assert.equal(requests.length, 3));
     await run("wrong package is rejected", [xml({...metadata, GUID:"com.other.app"})], "error");
     await run("version drift is rejected", [xml(metadata), xml({...grant, version:"10.0"})], "error");
     await run("size mismatch is rejected", [xml(metadata), xml({...grant, contentsSize:"4321"})], "error");
     await run("unrelated download host is rejected", [xml(metadata), xml({...grant, downLoadURI:"https://samsungapps.com.example.org/a.apk"})], "error");
+    await run("a CDN root is not accepted as an APK", [xml(metadata), xml({...grant, downLoadURI:"https://download.samsungapps.com/"})], "error");
     await run("DTD is rejected", ['<!DOCTYPE SamsungProtocol [<!ENTITY x "test">]><SamsungProtocol/>'], "error");
     await run("conflicting response fields are rejected", [xml(metadata).replace("</response>", '<param name="GUID">duplicate</param></response>')], "error");
     await run("oversized XML aborts the request", ["x".repeat(2000001)], "error");

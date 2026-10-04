@@ -101,4 +101,4 @@ docker compose up -d --build
 docker compose down
 ```
 
-另提供 [Galaxy Store 油猴脚本](galaxy-store/README.md)，可在应用详情页获取 APK 下载链接。
+另提供 [Galaxy Store 油猴脚本](galaxy-store/README.md)，可在网页的应用详情页下载 APK。

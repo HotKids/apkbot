@@ -429,6 +429,8 @@ def test_cn_bot_card_authorizes_but_never_requests_apk(
     grant = ods(
         dict(
             productID="00001",
+            version="01.02.3",
+            versionCode="123",
             binaryArch=architecture,
             contentsSize=42,
             downLoadURI=SIGNED_URL,
@@ -457,7 +459,7 @@ def test_cn_bot_card_authorizes_but_never_requests_apk(
     )
     assert calls[1].args == (
         "POST",
-        "https://cn-ms.galaxyappstore.com/ods.as?reqId=2316&ot=01&ct=B",
+        "https://cn-ms.galaxyappstore.com/ods.as?reqId=2311&ot=01&ct=B",
     )
     assert calls[2].args == (
         "GET",

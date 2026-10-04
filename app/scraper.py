@@ -11,6 +11,7 @@ import config
 from galaxy_store import (
     AppRequest,
     DownloadError,
+    HttpStatusError,
     InvalidResponse,
     LoginRequired,
     OdsProfile,
@@ -57,6 +58,7 @@ def validate_url(url):
         or port not in (None, 443)
         or u.fragment
         or not u.path.startswith("/")
+        or not u.path.strip("/")
         or "\\" in url
         or any(ord(c) < 33 for c in url)
         or not (
@@ -101,7 +103,9 @@ def open_response(session, method, url, *, deadline, **kwargs):
         if response.status_code != 200:
             status = response.status_code
             response.close()
-            raise TransportError(
+            if not 400 <= status <= 599:
+                raise TransportError("商店返回的信息无效，请稍后重试。")
+            raise HttpStatusError(
                 f"商店暂时不可用（HTTP {status}），请稍后重试。"
             )
         return response
@@ -231,9 +235,18 @@ class GalaxyStore:
             ):
                 raise VersionDrift("商店版本已发生变化，请重试。")
         else:
-            grant = parse_ods_grant(
-                self._ods("2316", self.profile.download(release)), release
-            )
+            try:
+                grant = parse_ods_grant(
+                    self._ods("2311", self.profile.download(release)), release
+                )
+            except (HttpStatusError, ServiceError, LoginRequired):
+                # Only an HTTP/API rejection permits restore authorization;
+                # malformed or mismatched grants must fail without another try.
+                grant = parse_ods_grant(
+                    self._ods("2316", self.profile.download(release, restore=True)),
+                    release,
+                    restore=True,
+                )
         validate_url(grant.url)
         return grant
 

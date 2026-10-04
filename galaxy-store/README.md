@@ -1,12 +1,12 @@
 # Galaxy Store 油猴脚本
 
-在 Galaxy Store 应用详情页添加「下载 APK」按钮，支持美国区和中国区。APK 由设备直接从 Samsung 服务器下载。
+通过 Galaxy Store 网页下载应用 APK，支持美国区和中国区。APK 由设备直接从 Samsung 服务器下载。
 
 ## 使用
 
 1. 在安卓 Edge 的「扩展」中安装 [Tampermonkey](https://www.tampermonkey.net/)。
 2. 点击 [安装脚本](https://raw.githubusercontent.com/HotKids/apkbot/main/galaxy-store/galaxy-store.user.js)，在油猴界面确认安装。
-3. 打开 Galaxy Store 应用详情页，点击「下载 APK」并确认下载。
+3. 打开 Galaxy Store 网页的应用详情页，点击「下载」并确认下载。若未自动开始下载，再点击一次「下载」。
 
 电脑可使用已安装 Tampermonkey 的浏览器，安卓也可使用 [Firefox](https://addons.mozilla.org/zh-CN/firefox/addon/tampermonkey/)。
 
@@ -18,6 +18,6 @@
 
 未指定地区时依次尝试美国区、中国区。网址携带 `cntyCd=CHN` 或 `cntyCd=USA` 时，仅查询对应地区；也接受 `CN`、`US`。应用名、版本及国旗以实际查询结果为准。
 
-网页提示「不支持」时，仍可使用下载按钮。脚本拦截页面链接和弹窗中的商店唤起；安卓若直接跳转到商店，请启用此网站的桌面网站模式。服务器在脚本运行前发出的跳转，以及页面直接修改地址的跳转，无法由脚本保证拦截。
+网页提示「不支持」时，仍可使用下载按钮。安卓若打开应用商店，可启用此网站的桌面网站模式后重试。
 
-下载链接有效期约为 10 分钟，失效后请刷新页面重新获取。应用可能受地区、设备或账户限制。
+下载链接有效期约为 10 分钟，失效后请点击「刷新」。应用可能受地区、设备或账户限制。
