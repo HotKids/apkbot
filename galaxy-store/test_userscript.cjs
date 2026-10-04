@@ -158,8 +158,9 @@ function gmBridge(overrides) {
       assert.match(requests[1].body, /name="dowloadType">new</);
       assert.match(requests[1].body, /name="deepLinkSource">N</);
       assert.doesNotMatch(requests[1].body, /name="(?:versionCode|loadType)"/);
-      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /9\.4\.02\.7 · 🇨🇳/);
-      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /文件大小：0\.00 MB\n版本代码：940207000\n包名：/);
+      const info = await page.locator("#apkbot-download p:nth-of-type(2)").textContent();
+      assert.match(info, /版本：9\.4\.02\.7 · 0\.00 MB · 🇨🇳\n\n包名：/);
+      assert.doesNotMatch(info, /文件大小：|版本代码：/);
       const order = await page.locator("#apkbot-download div button, #apkbot-download div a").allTextContents();
       assert.deepEqual(order, ["刷新", "下载"]);
     });

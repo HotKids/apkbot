@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Galaxy Store APK 下载
 // @namespace    https://github.com/HotKids/apkbot
-// @version      1.2.1
+// @version      1.2.2
 // @description  在 Galaxy Store 应用详情页获取 Samsung APK 下载链接。
 // @match        https://galaxystore.samsung.com/detail/*
 // @match        https://apps.galaxyappstore.com/detail/*
@@ -362,7 +362,7 @@
       try { result = await releaseDetails(result); } catch { checkPackage(); }
       checkPackage();
       titleLink.textContent = result.name;
-      info.textContent = `版本：${result.version} · ${result.region === "CN" ? "🇨🇳" : "🇺🇸"}\n\n文件大小：${(Number(result.size) / 1000000).toFixed(2)} MB${result.updated ? `\n更新时间：${result.updated}` : ""}\n版本代码：${result.versionCode}\n包名：${selectedPackage}`;
+      info.textContent = `版本：${result.version} · ${(Number(result.size) / 1000000).toFixed(2)} MB · ${result.region === "CN" ? "🇨🇳" : "🇺🇸"}\n\n${result.updated ? `更新时间：${result.updated}\n` : ""}包名：${selectedPackage}`;
       action.href = result.url;
       action.textContent = "下载";
       status.dataset.state = "ready";
