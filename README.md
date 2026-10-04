@@ -1,10 +1,10 @@
 # apkbot
 
-用于查询 Samsung Galaxy Store 应用、获取 APK 下载链接及订阅版本更新的 Telegram bot。APK 由用户设备直接从 Samsung 服务器下载。
+通过 Telegram 查询 Galaxy Store 应用、获取 APK 下载链接并订阅版本更新。APK 由设备直接从 Samsung 服务器下载。
 
-## Telegram 命令
+## 使用
 
-仅限管理员及白名单用户私聊使用。支持直接发送包名或 Galaxy Store 详情链接，也可输入 `/` 选择命令。
+仅限管理员及白名单用户私聊使用。发送包名或 Galaxy Store 详情链接即可查询，也可输入 `/` 选择命令。
 
 ```text
 com.samsung.android.app.sreminder CN
@@ -29,15 +29,15 @@ com.samsung.android.app.sreminder CN
 | `/check` | 立即检查更新 |
 | `/help` | 查看帮助 |
 
-未指定地区时依次尝试 US、CN；指定地区时仅查询对应商店。`/unsub` 未指定地区时，取消该应用所有地区的订阅。
+未指定地区时依次尝试 US、CN；指定地区时仅查询对应商店。取消订阅时未指定地区，将取消该应用所有地区的订阅。
 
-默认每 24 小时检查更新，启动约 1 分钟后进行首次检查。订阅首次检查成功后通知当前版本，后续以版本代码判断更新，地区切换不视为更新。
+默认每 24 小时检查更新，启动约 1 分钟后首次检查。订阅首次检查成功后通知当前版本，后续按版本代码判断更新，地区切换不视为更新。
 
-下载链接有效期约为 10 分钟，失效后请点击「刷新」重新获取。订阅通知中可点击「获取下载链接」，获取后点击「下载」。应用可能受地区、设备或账户限制。
+下载链接有效期约为 10 分钟，失效后请点击「刷新」。订阅通知中点击「获取下载链接」，再点击「下载」。应用可能受地区、设备或账户限制。
 
-## 首次部署
+## 部署
 
-服务器须安装 Git、[Docker Engine 与 Compose 插件](https://docs.docker.com/engine/install/)，并可访问 Telegram 和三星商店。无需域名或开放入站端口。
+服务器须安装 Git、[Docker Engine 与 Compose 插件](https://docs.docker.com/engine/install/)，并能访问 Telegram 和 Samsung。无需域名或开放入站端口。
 
 ```sh
 git clone https://github.com/HotKids/apkbot.git
@@ -47,7 +47,7 @@ chmod 600 .env
 nano .env
 ```
 
-编辑 `.env`，填写 [BotFather](https://t.me/BotFather) 提供的 Token 和管理员的 Telegram 数字用户 ID：
+在 `.env` 中填写 [BotFather](https://t.me/BotFather) 提供的 Token 和管理员的 Telegram 数字用户 ID：
 
 ```dotenv
 BOT_TOKEN=your_bot_token
@@ -59,11 +59,11 @@ docker compose up -d --build
 docker compose logs --tail=100 apkdl-bot
 ```
 
-日志显示 `apkbot started` 后，可在 Telegram 中发送包名验证。订阅与白名单保存在 `data/app.db`；备份须保留 `data` 和 `.env`。
+日志显示 `apkbot started` 后，在 Telegram 中发送包名验证。备份时须保留 `.env` 和 `data`，订阅与白名单保存在 `data/app.db`。
 
-## 原 VPS 部署迁移
+## VPS 目录迁移
 
-在 VPS 终端执行以下命令，将 `~/apkdl-tg-bot` 迁移至 `~/apkbot`，保留配置及数据。目标目录须不存在；原目录不同时，应替换对应路径。迁移期间服务暂时停止。
+以下命令将 `~/apkdl-tg-bot` 迁移至 `~/apkbot`，保留配置及数据。目标目录须不存在；原目录不同时，请替换对应路径。迁移期间服务暂时停止。
 
 ```sh
 (
@@ -84,18 +84,18 @@ docker compose logs --tail=100 apkdl-bot
 )
 ```
 
-Compose 服务名保留为 `apkdl-bot`。确认启动日志及 Telegram 查询正常后，均在 `~/apkbot` 中操作。命令出错时会停止；启动失败时，应在该目录排查并重新启动。
+Compose 服务名仍为 `apkdl-bot`。迁移后均在 `~/apkbot` 中操作。命令出错时会停止；启动失败时，请在该目录排查并重新启动。
 
-## 更新与停止
+## 维护
 
-在 `~/apkbot` 中更新：
+更新：
 
 ```sh
 git pull --ff-only
 docker compose up -d --build
 ```
 
-停止 bot：
+停止：
 
 ```sh
 docker compose down
