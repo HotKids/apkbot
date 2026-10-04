@@ -207,7 +207,9 @@ def test_card_escaping_hierarchy_and_exact_region():
     assert "版本代码：<code>123</code>" in card.html()
     assert "包名：<code>com.example.app</code>" in card.html()
     facts = card.blocks()[2]
-    assert facts["type"] == "table" and facts["is_bordered"] is False
+    assert facts["type"] == "table" and facts["is_bordered"] is True
+    assert facts["is_striped"] is True
+    assert "is_compact" not in facts
     assert [row[0]["text"] for row in facts["cells"]] == [
         "文件大小",
         "更新时间",

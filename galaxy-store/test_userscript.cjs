@@ -98,26 +98,48 @@ function gmBridge(overrides) {
         await page.goto(`https://${options.host || "galaxystore.samsung.com"}/detail/${options.packageName || packageName}${options.query ?? "?cntyCd=CHN"}`);
         assert.equal(await page.locator("#apkbot-download").count(), 1);
         assert.equal(requests.length, 0, "Opening the page does not authorize a download");
-        const downloadEvent = expected === "ready" ? page.waitForEvent("download", {timeout:5000}) : null;
+        assert.equal(requests.extra.length, 0);
+        assert.equal(await page.locator("#apkbot-download div a").textContent(), "获取");
+        assert.equal(await page.locator("#apkbot-download button").isVisible(), false);
+        assert.equal(await page.locator("#apkbot-download > p:last-child").textContent(), "");
+        const downloadEvent = expected === "ready" && !options.blockAutomaticDownload ? page.waitForEvent("download", {timeout:5000}) : null;
         downloadEvent?.catch(() => {});
         await page.locator("#apkbot-download div a").click();
         if (options.duringRequest) await options.duringRequest(page);
         await page.waitForFunction(() => ["ready", "error"].includes(document.querySelector("#apkbot-download [data-state]")?.dataset.state));
         assert.equal(await page.locator("[data-state]").getAttribute("data-state"), expected, name);
-        assert.equal(await page.locator("#apkbot-download div a").textContent(), "下载");
+        assert.equal(await page.locator("#apkbot-download div a").textContent(), expected === "ready" ? "下载" : "获取");
         assert.equal(await page.locator("#apkbot-download div a").getAttribute("aria-disabled"), null);
-        if (downloadEvent) {
-          const download = await downloadEvent;
+        assert.equal(await page.locator("#apkbot-download section, #apkbot-download blockquote, #apkbot-download h3").count(), 0);
+        if (expected === "ready") {
+          assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), grant.downLoadURI);
+          const queryCount = requests.length;
+          const detailCount = requests.extra.length;
+          let download;
+          if (downloadEvent) download = await downloadEvent;
+          else {
+            assert.equal(await page.evaluate(() => window.automaticDownloadAttempts), 1);
+            assert.equal(apkRequests, 0);
+            assert.equal(downloads.length, 0);
+            const manualDownload = page.waitForEvent("download", {timeout:5000});
+            await page.locator("#apkbot-download div a").click();
+            download = await manualDownload;
+          }
           assert.equal(download.url(), grant.downLoadURI);
           assert.equal(download.suggestedFilename(), "fixture.apk");
           assert.equal(await download.failure(), null);
           assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), grant.downLoadURI);
+          assert.equal(requests.length, queryCount, "Downloading uses the ready URL without another query");
+          assert.equal(requests.extra.length, detailCount);
         } else {
           assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), "#");
         }
         assert.equal(apkRequests, expected === "ready" ? 1 : 0);
         assert.equal(downloads.length, expected === "ready" ? 1 : 0);
         if (verify) await verify(page, requests);
+        await page.waitForTimeout(30);
+        assert.equal(apkRequests, expected === "ready" ? 1 : 0, "Refreshing or failed catalog switches never start an automatic transfer");
+        assert.equal(downloads.length, expected === "ready" ? 1 : 0);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
         checks++;
         console.log(`PASS ${name}`);
@@ -127,7 +149,7 @@ function gmBridge(overrides) {
     await run("explicit US recovers through its own ODS without changing region", [stubDenied, xml(metadata), xml(grant)], "ready", async page => {
       assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /🇺🇸/);
     }, {query:"?cntyCd=USA"});
-    await run("CN mapping works on the unsupported page and starts one direct download", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
+    await run("getting CN information on the unsupported page starts one direct download", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
       assert.equal(requests.length, 2);
       const identities = requests.map(request => /logId="([a-f0-9]{16})"/.exec(request.body)[1]);
       assert.equal(identities[0], identities[1]);
@@ -137,9 +159,24 @@ function gmBridge(overrides) {
       assert.match(requests[1].body, /name="deepLinkSource">N</);
       assert.doesNotMatch(requests[1].body, /name="(?:versionCode|loadType)"/);
       assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /9\.4\.02\.7 · 🇨🇳/);
-      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /文件大小：0\.00 MB\n更新时间：暂无信息\n版本代码：940207000\n包名：/);
+      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /文件大小：0\.00 MB\n版本代码：940207000\n包名：/);
       const order = await page.locator("#apkbot-download div button, #apkbot-download div a").allTextContents();
       assert.deepEqual(order, ["刷新", "下载"]);
+    });
+    await run("a blocked automatic attempt leaves a ready URL for manual downloading without another query", [xml(metadata), xml(grant)], "ready", null, {
+      blockAutomaticDownload:true,
+      setup:page => page.addInitScript(() => {
+        window.automaticDownloadAttempts = 0;
+        const click = HTMLAnchorElement.prototype.click;
+        // Model a browser blocking script-generated navigation, while trusted clicks still work.
+        HTMLAnchorElement.prototype.click = function () {
+          if (this.closest("#apkbot-download") && this.href.startsWith("https://download.samsungapps.com/")) {
+            window.automaticDownloadAttempts++;
+            return;
+          }
+          return click.call(this);
+        };
+      })
     });
     const denied = '<SamsungProtocol><errorString errorCode="4002">Denied</errorString></SamsungProtocol>';
     const legacyGrant = {...grant};
@@ -170,6 +207,7 @@ function gmBridge(overrides) {
       assert.equal(requests.length, 4);
       assert.equal(await page.locator("#apkbot-download").count(), 1);
       assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), grant.downLoadURI);
+      assert.equal(await page.locator("#apkbot-download div a").textContent(), "下载");
       assert.equal(await page.locator("#apkbot-download > p:last-child").textContent(), "下载链接有效期约为 10 分钟，失效后请点击「刷新」。");
     });
     await run("failed refresh preserves the previous card and direct URL", [xml(metadata), xml(grant), xml({...metadata, version:"10.0", versionCode:"1000000000", productName:"New app name"}), denied, denied, denied], "ready", async (page, requests) => {
@@ -181,6 +219,7 @@ function gmBridge(overrides) {
       assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /版本：9\.4\.02\.7/);
       assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), grant.downLoadURI);
       assert.equal(await page.locator("[data-state]").getAttribute("data-state"), "ready");
+      assert.equal(await page.locator("#apkbot-download div a").textContent(), "下载");
     });
     await run("switching apps clears old information when the new query fails", [xml(metadata), xml(grant), xml({...metadata, GUID:"com.example.other", needToLogin:"1"})], "ready", async (page, requests) => {
       await page.evaluate(() => history.pushState(null, "", "/detail/com.example.other?cntyCd=CHN"));
@@ -193,6 +232,7 @@ function gmBridge(overrides) {
       assert.equal(await page.locator("#apkbot-download > p:last-child").textContent(), "");
       assert.equal(await page.locator("#apkbot-download button").isVisible(), false);
       assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), "#");
+      assert.equal(await page.locator("#apkbot-download div a").textContent(), "获取");
     });
     await run("switching apps stops restore after primary authorization rejection", [xml(metadata), denied, xml(legacyGrant)], "error", (_, requests) => assert.equal(requests.length, 2), {
       delay:100,
@@ -250,21 +290,24 @@ function gmBridge(overrides) {
       "2290":ods(mainDetails, "2290"),
       "2291":ods(overviewDetails, "2291").replace('</list>', '<extList name="dataSafetyList"><extList name="dataSafety">first</extList><extList name="dataSafety">second</extList></extList><extList name="curatedComponentList"><extList name="componentInfo"><type>one</type></extList><extList name="componentInfo"><type>two</type></extList></extList></list>')
     };
-    await run("matching detail sandwich displays the store date and ordinary publisher quote", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
+    await run("matching detail sandwich displays the store date without an update log", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
       assert.deepEqual(requests.extra.map(r => r.url.searchParams.get("reqId")), ["2300", "2290", "2291", "2290"]);
       assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间：2026-08-25/);
-      assert.equal(await page.locator("#apkbot-download blockquote").textContent(), overviewDetails.updateDescription);
-      assert.equal(await page.locator("#apkbot-download blockquote b").count(), 0);
       assert.equal(await page.locator("#apkbot-download details").count(), 0);
-      assert.equal(await page.locator("#apkbot-download h3").textContent(), "更新日志");
       assert.equal(await page.locator("#apkbot-download h2 a").getAttribute("href"), `https://galaxystore.samsung.com/detail/${packageName}`);
     }, {details:detailResponses});
     await run("refresh reuses discovery and preserves one card without another automatic transfer", [xml(metadata), xml(grant), xml(metadata), xml(grant)], "ready", async (page, requests) => {
       await page.locator("#apkbot-download button").click();
       await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').textContent === "下载链接已更新。");
       assert.equal(requests.extra.filter(r => r.url.searchParams.get("reqId") === "2300").length, 1);
-      assert.equal(await page.locator("#apkbot-download blockquote").textContent(), overviewDetails.updateDescription);
+      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间：2026-08-25/);
     }, {details:detailResponses});
+    await run("refresh hides a date that the store no longer supplies", [xml(metadata), xml(grant), xml(metadata), xml(grant)], "ready", async page => {
+      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间：2026-08-25/);
+      await page.locator("#apkbot-download button").click();
+      await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').textContent === "下载链接已更新。");
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
+    }, {details:{...detailResponses, "2291":(_, count) => ods({...overviewDetails, lastUpdateDate:count === 1 ? "2026;08;25;" : ""}, "2291")}});
     for (const endpoint of ["http://cn-ms.galaxyappstore.com/ods.as", "https://evil.example/ods.as", "https://cn-ms.galaxyappstore.com.example.org/ods.as", "https://cn-ms.galaxyappstore.com/other", "https://cn-ms.galaxyappstore.com/ods.as?secret=1", "https://user@cn-ms.galaxyappstore.com/ods.as", "https://cn-ms.galaxyappstore.com:8443/ods.as"]) {
       await run("discovery only upgrades or retains a fixed trusted region endpoint", [xml(metadata), xml(grant)], "ready", (_, requests) => {
         assert.equal(requests[0].url.origin, "https://cn-ms.galaxyappstore.com");
@@ -273,23 +316,22 @@ function gmBridge(overrides) {
     }
     await run("failed endpoint discovery uses the fixed catalog without another discovery loop", [xml(metadata), xml(grant)], "ready", null, {discovery:{status:503, body:"unavailable"}});
     for (const date of ["", "2026;02;30;", "2026-08-25", "2026;08;25;extra"]) {
-      await run("missing or invalid store dates display no information", [xml(metadata), xml(grant)], "ready", async page => {
-        assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间：暂无信息/);
+      await run("missing or invalid store dates hide the date field", [xml(metadata), xml(grant)], "ready", async page => {
+        assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
       }, {details:{...detailResponses, "2291":ods({...overviewDetails, lastUpdateDate:date}, "2291")}});
     }
     await run("overview with a different version is not attached to the download", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
-      assert.equal(await page.locator("#apkbot-download section").isVisible(), false);
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
       assert.equal(requests.extra.filter(r => r.url.searchParams.get("reqId") === "2290").length, 1);
     }, {details:{...detailResponses, "2291":ods({...overviewDetails, version:"10.0"}, "2291")}});
-    await run("a version change across the overview discards its date and notes", [xml(metadata), xml(grant)], "ready", async page => {
-      assert.equal(await page.locator("#apkbot-download section").isVisible(), false);
-      assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间：暂无信息/);
+    await run("a version change across the overview discards its date", [xml(metadata), xml(grant)], "ready", async page => {
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
     }, {details:{...detailResponses, "2290":(_, count) => ods(count === 1 ? mainDetails : {...mainDetails, versionCode:"999999999"}, "2290")}});
     await run("critical overview duplicates are rejected while unrelated nested fields remain ignored", [xml(metadata), xml(grant)], "ready", async page => {
-      assert.equal(await page.locator("#apkbot-download section").isVisible(), false);
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
     }, {details:{...detailResponses, "2291":ods(overviewDetails, "2291").replace('</list>', '<value name="version">conflict</value></list>')}});
     await run("detail responses with another method ID do not contribute display information", [xml(metadata), xml(grant)], "ready", async page => {
-      assert.equal(await page.locator("#apkbot-download section").isVisible(), false);
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
     }, {details:{...detailResponses, "2291":ods(overviewDetails, "2290")}});
     await run("a partner response cannot replace primary authorization", [xml(metadata), ods(grant, "2801")], "error", (_, requests) => {
       assert.equal(requests.length, 2);
@@ -319,6 +361,7 @@ function gmBridge(overrides) {
       await page.locator("#apkbot-download div a").click();
       await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').dataset.state === "error");
       assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), "#");
+      assert.equal(await page.locator("#apkbot-download div a").textContent(), "获取");
       assert.equal(await page.locator("#apkbot-download > p:last-child").textContent(), "");
       assert.equal(await page.locator("#apkbot-download button").isVisible(), false);
       assert.equal(requests[3].url.hostname, "us-odc.samsungapps.com");
@@ -330,12 +373,12 @@ function gmBridge(overrides) {
         await page.evaluate(() => history.pushState(null, "", "?cntyCd=USA"));
       }
     });
-    await run("a wrong product main response never contributes a log or date", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
-      assert.equal(await page.locator("#apkbot-download section").isVisible(), false);
+    await run("a wrong product main response never contributes a date", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
       assert.equal(requests.extra.filter(r => r.url.searchParams.get("reqId") === "2291").length, 0);
     }, {details:{...detailResponses, "2290":ods({...mainDetails, productID:"99999"}, "2290")}});
-    await run("overview size mismatch never attaches another binary's log", [xml(metadata), xml(grant)], "ready", async page => {
-      assert.equal(await page.locator("#apkbot-download section").isVisible(), false);
+    await run("overview size mismatch never attaches another binary's date", [xml(metadata), xml(grant)], "ready", async page => {
+      assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /更新时间/);
     }, {details:{...detailResponses, "2291":ods({...overviewDetails, realContentsSize:"999"}, "2291")}});
     await run("malformed protocol returnCode is not an authorization rejection", [xml(metadata), denied.replace('<SamsungProtocol>', '<SamsungProtocol><response returnCode="invalid">').replace('</SamsungProtocol>', '</response></SamsungProtocol>')], "error", (_, requests) => assert.equal(requests.length, 2));
     await run("a captured explicit region survives the site's same-document error page", [xml(metadata), xml(grant)], "ready", null, {html:'<script>history.replaceState(null,"","/error/4002")</script>'});

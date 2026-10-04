@@ -44,7 +44,7 @@ def rich_text(text):
 
 
 def table(rows):
-    # Borderless compact two-column table: labels and values line up.
+    # Telegram owns column widths; omit compact for regular cell padding.
     return {
         "type": "table",
         "cells": [
@@ -54,9 +54,8 @@ def table(rows):
             ]
             for row in rows
         ],
-        "is_bordered": False,
-        "is_striped": False,
-        "is_compact": True,
+        "is_bordered": True,
+        "is_striped": True,
     }
 
 

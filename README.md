@@ -39,9 +39,9 @@ com.samsung.android.app.sreminder CN
 
 ## 油猴脚本
 
-在 Galaxy Store 的应用详情网页中提供「下载」按钮，可独立使用。
+在 Galaxy Store 应用详情网页中下载 APK，可独立使用。
 
-安装 [Tampermonkey](https://www.tampermonkey.net/) 后，点击 [安装脚本](https://raw.githubusercontent.com/HotKids/apkbot/main/galaxy-store/galaxy-store.user.js)。随后打开应用详情网页，点击「下载」。Android 可在 Edge 的「扩展」中安装 Tampermonkey。
+安装 [Tampermonkey](https://www.tampermonkey.net/) 后，点击 [安装脚本](https://raw.githubusercontent.com/HotKids/apkbot/main/galaxy-store/galaxy-store.user.js)。随后打开应用详情网页，点击「获取」以查询应用信息并尝试下载；若未开始，请点击「下载」。Android 可在 Edge 的「扩展」中安装 Tampermonkey。
 
 安装步骤、地区选择及使用示例见 [油猴脚本说明](galaxy-store/README.md)。
 

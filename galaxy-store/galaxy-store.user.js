@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Galaxy Store APK 下载
 // @namespace    https://github.com/HotKids/apkbot
-// @version      1.2.0
+// @version      1.2.1
 // @description  在 Galaxy Store 应用详情页获取 Samsung APK 下载链接。
 // @match        https://galaxystore.samsung.com/detail/*
 // @match        https://apps.galaxyappstore.com/detail/*
@@ -53,32 +53,24 @@
   title.append(titleLink);
   title.style.cssText = "margin:0 0 8px;font-size:18px;color:inherit";
   const status = document.createElement("p");
-  status.textContent = "点击「下载」获取下载链接。";
+  status.textContent = "点击「获取」查询应用信息并下载 APK。";
   status.dataset.state = "idle";
   status.setAttribute("role", "status");
   const info = document.createElement("p");
   info.textContent = `包名：${packageName}`;
   info.style.whiteSpace = "pre-line";
-  const notes = document.createElement("section");
-  notes.hidden = true;
-  const notesTitle = document.createElement("h3");
-  notesTitle.textContent = "更新日志";
-  notesTitle.style.cssText = "margin:12px 0 6px;font-size:16px";
-  const quote = document.createElement("blockquote");
-  quote.style.cssText = "margin:0 0 12px;padding-left:12px;border-left:3px solid #ddd;white-space:pre-wrap";
-  notes.append(notesTitle, quote);
   const controls = document.createElement("div");
   const refresh = document.createElement("button");
   refresh.textContent = "刷新";
   refresh.hidden = true;
   refresh.style.cssText = "margin-right:8px;padding:12px 20px;background:#eef2f6;color:#17202a;border:0;border-radius:10px;font:inherit;cursor:pointer";
   const action = document.createElement("a");
-  action.textContent = "下载";
+  action.textContent = "获取";
   action.href = "#";
   action.style.cssText = "display:inline-block;padding:12px 20px;background:#1769e0;color:#fff;border-radius:10px;text-decoration:none";
   const hint = document.createElement("p");
   controls.append(refresh, action);
-  panel.append(title, status, info, notes, controls, hint);
+  panel.append(title, status, info, controls, hint);
   const showPanel = () => (document.body || document.documentElement).append(panel);
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", showPanel, {once:true});
   else showPanel();
@@ -166,7 +158,7 @@
       const key = node.getAttribute("name") || node.nodeName;
       if (keys && !keys.includes(key)) continue;
       if (Object.hasOwn(fields, key)) throw new StoreError("三星商店返回的信息存在冲突，请稍后重试。");
-      fields[key] = key === "updateDescription" ? node.textContent : node.textContent.trim();
+      fields[key] = node.textContent.trim();
     }
     return fields;
   }
@@ -198,7 +190,7 @@
       const key = node.getAttribute("name") || node.nodeName;
       if (!keys.includes(key)) continue;
       if ((lists[0] && node.nodeName !== "value") || node.children.length || Object.hasOwn(fields, key)) throw new StoreError("三星商店返回的信息存在冲突，请稍后重试。");
-      fields[key] = key === "updateDescription" ? node.textContent : node.textContent.trim();
+      fields[key] = node.textContent.trim();
     }
     return fields;
   }
@@ -316,7 +308,7 @@
   async function releaseDetails(result) {
     const endpoint = await resolveEndpoint(result.region);
     const params = {GUID:packageName, productID:result.productId, imei:identity, stduk:identity, extuk:identity};
-    const keys = ["GUID", "productID", "version", "versionCode", "realContentsSize", "productName", "lastUpdateDate", "updateDescription"];
+    const keys = ["GUID", "productID", "version", "versionCode", "realContentsSize", "productName", "lastUpdateDate"];
     const mainParams = {...params, productImgWidth:"135", productImgHeight:"135", lkAppIncludedYN:"Y", predeployed:"0", triggeredFrom:"detail"};
     const matchesMain = fields => fields.GUID === packageName && fields.productID === result.productId && fields.version === result.version && positive(fields.versionCode) === positive(result.versionCode) && positive(fields.realContentsSize) === positive(result.size);
     const before = await request(result.region, "guidProductDetailExMain", "2290", mainParams, keys, endpoint);
@@ -326,19 +318,18 @@
     // Overview omits the product ID and version code; bind it between matching main responses.
     const after = await request(result.region, "guidProductDetailExMain", "2290", mainParams, keys, endpoint);
     if (!matchesMain(after)) return result;
-    return {...result, name:after.productName || result.name, updated:storeDate(overview.lastUpdateDate), notes:overview.updateDescription};
+    return {...result, name:after.productName || result.name, updated:storeDate(overview.lastUpdateDate)};
   }
 
   function resetPackage(value) {
     packageName = value;
     status.dataset.state = "idle";
+    action.textContent = "获取";
     action.href = "#";
     titleLink.textContent = value;
     titleLink.href = "https://galaxystore.samsung.com/detail/" + value;
     info.textContent = `包名：${value}`;
     hint.textContent = "";
-    notes.hidden = true;
-    quote.textContent = "";
     refresh.hidden = true;
   }
 
@@ -371,10 +362,9 @@
       try { result = await releaseDetails(result); } catch { checkPackage(); }
       checkPackage();
       titleLink.textContent = result.name;
-      info.textContent = `版本：${result.version} · ${result.region === "CN" ? "🇨🇳" : "🇺🇸"}\n\n文件大小：${(Number(result.size) / 1000000).toFixed(2)} MB\n更新时间：${result.updated || "暂无信息"}\n版本代码：${result.versionCode}\n包名：${selectedPackage}`;
-      notes.hidden = !result.notes;
-      quote.textContent = result.notes || "";
+      info.textContent = `版本：${result.version} · ${result.region === "CN" ? "🇨🇳" : "🇺🇸"}\n\n文件大小：${(Number(result.size) / 1000000).toFixed(2)} MB${result.updated ? `\n更新时间：${result.updated}` : ""}\n版本代码：${result.versionCode}\n包名：${selectedPackage}`;
       action.href = result.url;
+      action.textContent = "下载";
       status.dataset.state = "ready";
       refresh.hidden = false;
       status.textContent = isRefresh ? "下载链接已更新。" : "已获取下载链接。若未开始下载，请点击「下载」。";
@@ -387,7 +377,10 @@
         resetPackage(latestPackage || packageName);
         requestedRegion = readRegion();
       }
-      if (!hadLink || !samePackage) action.href = "#";
+      if (!hadLink || !samePackage) {
+        action.href = "#";
+        action.textContent = "获取";
+      }
       status.dataset.state = hadLink && samePackage ? "ready" : "error";
       const failure = isRefresh ? "下载链接更新失败" : status.dataset.phase === "query" ? "应用信息查询失败" : "下载链接获取失败";
       status.textContent = `${failure}：${error instanceof StoreError ? error.message : "暂时无法完成请求，请稍后重试。"}`;
