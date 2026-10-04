@@ -7,6 +7,6 @@ if [ "$(id -u)" = 0 ]; then
     if chown -R apkdl:apkdl /data 2>/dev/null; then
         exec setpriv --reuid=apkdl --regid=apkdl --init-groups "$@"
     fi
-    echo "APKDL: cannot hand /data to user apkdl; running as root" >&2
+    echo "apkbot: cannot hand /data to user apkdl; running as root" >&2
 fi
 exec "$@"

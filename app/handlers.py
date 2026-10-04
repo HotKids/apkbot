@@ -1,4 +1,4 @@
-"""APKDL commands. Private chats, durable callbacks, and confirmed-send state."""
+"""apkbot commands. Private chats, durable callbacks, and confirmed-send state."""
 
 from html import escape
 import logging

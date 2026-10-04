@@ -7,7 +7,7 @@ from telebot import apihelper
 
 def telegram_request(method, url, *, params=None, files=None, **kwargs):
     if files:
-        raise ValueError("File uploads are disabled; APKDL sends download links")
+        raise ValueError("File uploads are disabled; apkbot sends download links")
     # Telegram accepts POST for every Bot API method. Keep message/keyboard
     # fields out of query strings, including any signed Samsung URL.
     return apihelper._get_req_session().request(

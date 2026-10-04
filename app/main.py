@@ -76,7 +76,7 @@ def main():
     previous_sigterm = signal.signal(signal.SIGTERM, lambda *_: bot.stop_polling())
     try:
         logging.getLogger("apkdl-bot").info(
-            "APKDL started; Galaxy Store checks every %dm", config.CHECK_INTERVAL
+            "apkbot started; Galaxy Store checks every %dm", config.CHECK_INTERVAL
         )
         bot.infinity_polling(
             timeout=30,

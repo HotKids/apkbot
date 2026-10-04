@@ -232,7 +232,7 @@ def subscription_card(app, added, release=None, name=None):
 
 def help_card():
     return Card(
-        "APKDL",
+        "apkbot",
         ("查询 Samsung Galaxy Store 应用版本，获取 APK 下载链接并订阅更新。",),
         sections=(
             Section(
