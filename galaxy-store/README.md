@@ -1,6 +1,6 @@
 # Galaxy Store 油猴脚本
 
-在 Galaxy Store 应用详情网页中查询应用信息并下载 APK，适用于美国区和中国区的应用。APK 由设备直接从 Samsung 服务器下载。
+在 Galaxy Store 应用详情网页中查询应用信息并下载 APK，适用于美国区和中国区的应用。APK 由设备通过商店提供的链接直接下载；中国区联运应用使用腾讯下载链接。
 
 ## 安装与使用
 
@@ -8,7 +8,7 @@
 2. 点击 [安装脚本](https://raw.githubusercontent.com/HotKids/apkbot/main/galaxy-store/galaxy-store.user.js)，在 Tampermonkey 界面确认安装。
 3. 打开 Galaxy Store 应用详情网页，点击「获取」，脚本将获取应用信息并尝试下载。若未开始，请点击「下载」。
 
-下载链接有效期约为 10 分钟，失效后请点击「刷新」，再点击「下载」。安装或更新脚本后，请重新加载已打开的应用详情页。
+Samsung 下载链接有效期约为 10 分钟。链接失效后，请点击「刷新」，再点击「下载」。安装或更新脚本后，请重新加载已打开的应用详情页。
 
 ## 地区选择
 

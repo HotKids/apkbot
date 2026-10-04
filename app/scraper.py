@@ -51,7 +51,7 @@ def new_session():
     return session
 
 
-def validate_url(url):
+def validate_url(url, *, linked_product=False):
     try:
         u = urlsplit(url)
         host = u.hostname or ""
@@ -71,13 +71,14 @@ def validate_url(url):
         or any(ord(c) < 33 for c in url)
         or not (
             host == "galaxystore.samsung.com"
+            or (linked_product and host == "auto-dd.myapp.com")
             or any(
                 host == suffix or host.endswith("." + suffix)
                 for suffix in ("samsungapps.com", "galaxyappstore.com")
             )
         )
     ):
-        raise InvalidResponse("商店返回的地址不属于 Samsung，请稍后重试。")
+        raise InvalidResponse("商店返回的下载地址不受支持，请稍后重试。")
     return url
 
 
@@ -249,7 +250,14 @@ class GalaxyStore:
             )
         if not release.installable:
             raise ServiceError("此版本暂不支持安装，无法获取下载链接。")
-        if release.channel == "stub":
+        if release.linked_product:
+            if release.region != "CN" or release.channel != "ods" or release.size is None:
+                raise InvalidResponse("商店联运下载信息无法确认，请稍后重试。")
+            grant = parse_ods_grant(
+                self._ods("2801", self._profile("CN").mirror(release), region="CN"),
+                release, partner=True,
+            )
+        elif release.channel == "stub":
             # The stub answer that selected this release already carries its
             # URL; asking again only adds a request and a chance of drift.
             grant = self._stub_grant
@@ -284,7 +292,7 @@ class GalaxyStore:
                     if fields.get("GUID") != release.package or release.size is None:
                         raise InvalidResponse("商店备用下载信息无法确认，请稍后重试。")
                     grant = parse_ods_grant(data, release, request_id="2801")
-        validate_url(grant.url)
+        validate_url(grant.url, linked_product=release.linked_product and release.region == "CN")
         return grant
 
     def batch_updates(self, baselines, region):

@@ -194,6 +194,10 @@ def release_card(release, notes=None, *, update=False):
         f"{release.size / 1_000_000:.2f} MB" if release.size is not None else "暂无信息"
     )
     title = app_title(release.package, release.name)
+    footer = "" if update else (
+        "下载链接失效后，请点击「刷新」。" if release.linked_product
+        else "下载链接有效期约为 10 分钟，失效后请点击「刷新」。"
+    )
     return Card(
         title=(title, " · 版本更新") if update else title,
         highlight=version_line(release.version_name, release.region),
@@ -206,7 +210,7 @@ def release_card(release, notes=None, *, update=False):
         sections=(Section("更新日志", short(notes, 1200), quoted=True),)
         if notes
         else (),
-        footer=("" if update else "下载链接有效期约为 10 分钟，失效后请点击「刷新」。"),
+        footer=footer,
     )
 
 
@@ -247,7 +251,7 @@ def help_card():
                     (code("/list"), "查看我的订阅"),
                 ),
                 note="直接发送包名或 Galaxy Store 详情链接也可获取下载链接。"
-                "下载文件由设备直接从 Samsung 获取。链接失效后，请点击「刷新」。",
+                "下载文件由设备通过商店提供的链接直接获取。链接失效后，请点击「刷新」。",
             ),
             Section(
                 "地区",

@@ -63,7 +63,7 @@ PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+")
 # Samsung lists some of its own US builds under release labels such as
 # "[260921] GALAXY Store 9CR Update -  US" (stub and US web page alike).
 RELEASE_LABEL = re.compile(r"\[\d+\]\s")
-ODS_CRITICAL = {"GUID", "productID", "version", "versionCode", "realContentsSize", "contentsSize", "downLoadURI", "productName", "needToLogin", "installableYN", "errorCode", "errorString"}
+ODS_CRITICAL = {"GUID", "productID", "version", "versionCode", "realContentsSize", "contentsSize", "downLoadURI", "productName", "needToLogin", "installableYN", "linkProductYn", "errorCode", "errorString"}
 REGIONS = {
     "CN": dict(mcc="460", mnc="00", csc="CHC", lang="zh_CN", country="CHN"),
     "US": dict(mcc="310", mnc="260", csc="XAA", lang="en_US", country="USA"),
@@ -128,6 +128,7 @@ class Release:
     needs_login: bool = False
     installable: bool = True
     updated_date: str | None = None
+    linked_product: bool = False
 
     @property
     def identity(self):
@@ -280,7 +281,8 @@ def parse_ods_metadata(data, package, region="CN"):
     product = _identity(fields, package, "GUID", "productID")
     login = required(fields, "needToLogin")
     installable = required(fields, "installableYN")
-    if login not in {"0", "1"} or installable not in {"Y", "N"}:
+    linked = fields.get("linkProductYn", "0")
+    if login not in {"0", "1"} or installable not in {"Y", "N"} or linked not in {"0", "1"}:
         raise InvalidResponse("商店返回的应用信息无效，请稍后重试。")
     return Release(
         package,
@@ -294,23 +296,28 @@ def parse_ods_metadata(data, package, region="CN"):
         else None,
         needs_login=login == "1",
         installable=installable == "Y",
+        linked_product=linked == "1",
     )
 
 
-def parse_ods_grant(data, release, *, restore=False, request_id=None):
-    fields = xml_fields(data, "SamsungProtocol", request_id or ("2316" if restore else "2311"))
+def parse_ods_grant(data, release, *, restore=False, partner=False, request_id=None):
+    if partner and (release.region != "CN" or release.channel != "ods" or not release.linked_product or release.size is None):
+        raise InvalidResponse("商店联运下载信息无法确认，请稍后重试。")
+    fields = xml_fields(data, "SamsungProtocol", request_id or ("2801" if partner else "2316" if restore else "2311"))
     check_ods_status(fields)
-    if required(fields, "productID") != release.product_id:
+    # Linked-product 2801 replies omit Samsung product/GUID identifiers. Only
+    # confirmed CN linked metadata permits this version-and-full-size contract.
+    if (not partner or "productID" in fields) and required(fields, "productID") != release.product_id:
         raise InvalidResponse("商店返回的下载信息与所选应用不一致，请重试。")
     if "GUID" in fields and fields["GUID"] != release.package:
         raise InvalidResponse("商店返回的下载信息与所选应用不一致，请重试。")
     # binaryArch describes CPU coverage (e.g. 32n64), not full vs. delta APKs.
     # Use the full download's downLoadURI and contentsSize below.
     # 2311 binds the grant to the selected version; 2316 may omit these fields.
-    if not restore or "version" in fields:
+    if partner or not restore or "version" in fields:
         if required(fields, "version") != release.version_name:
             raise VersionDrift("商店版本已发生变化，请重试。")
-    if not restore or "versionCode" in fields:
+    if partner or not restore or "versionCode" in fields:
         if positive(fields, "versionCode") != release.version_code:
             raise VersionDrift("商店版本已发生变化，请重试。")
     size = positive(fields, "contentsSize")

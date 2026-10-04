@@ -182,7 +182,7 @@ def _link_owned(
         )
         return
     try:
-        # Only the button carries the temporary Samsung URL; never fetch APK bytes.
+        # Only the button carries the temporary store URL; never fetch APK bytes.
         messages.edit(chat_id, progress_id, card, markup)
     except Exception:
         if callback_id:

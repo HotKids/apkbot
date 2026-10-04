@@ -18,6 +18,9 @@ const metadata = {
   version:"9.4.02.7", versionCode:"940207000", realContentsSize:"1234", needToLogin:"0", installableYN:"Y"
 };
 const grant = {productID:"12345", version:metadata.version, versionCode:metadata.versionCode, contentsSize:"1234", downLoadURI:"https://download.samsungapps.com/fixture.apk"};
+const linkedUrl = "https://auto-dd.myapp.com/fixture.apk";
+const linkedMetadata = {...metadata, linkProductYn:"1"};
+const linkedGrant = {appId:"internal-lookup-id", version:metadata.version, versionCode:metadata.versionCode, contentsSize:"1234", downLoadURI:linkedUrl};
 const us = {resultCode:"1", appId:packageName, productId:"12345", productName:"US app", versionName:"1.0", versionCode:"100", contentSize:"1234", downloadURI:grant.downLoadURI};
 const escapeXml = text => String(text).replace(/[&<>"']/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&apos;"}[c]));
 const xml = fields => `<SamsungProtocol><response><errorString errorCode="0">Success</errorString>${Object.entries(fields).map(([key, value]) => `<param name="${key}">${escapeXml(value)}</param>`).join("")}</response></SamsungProtocol>`;
@@ -48,6 +51,7 @@ function gmBridge(overrides) {
   let checks = 0;
   try {
     async function run(name, responses, expected, verify, options = {}) {
+      const expectedUrl = options.downloadUrl || grant.downLoadURI;
       const page = await browser.newPage({viewport:{width:412, height:915}});
       const requests = [], downloads = [];
       requests.extra = [];
@@ -63,7 +67,7 @@ function gmBridge(overrides) {
         if (["galaxystore.samsung.com", "apps.galaxyappstore.com"].includes(url.hostname)) {
           return route.fulfill({status:options.pageStatus || 404, contentType:"text/html", body:`<!doctype html><html><body><h1>应用程序不受支持</h1><p>此应用程序不再出售或在此国家不受支持。</p>${options.html || ""}</body></html>`});
         }
-        if (request.url() === grant.downLoadURI) {
+        if (request.url() === expectedUrl) {
           apkRequests++;
           return route.fulfill({contentType:"application/vnd.android.package-archive", headers:{"Content-Disposition":"attachment; filename=fixture.apk"}, body:Buffer.alloc(1234)});
         }
@@ -111,7 +115,7 @@ function gmBridge(overrides) {
         assert.equal(await page.locator("#apkbot-download div a").getAttribute("aria-disabled"), null);
         assert.equal(await page.locator("#apkbot-download section, #apkbot-download blockquote, #apkbot-download h3").count(), 0);
         if (expected === "ready") {
-          assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), grant.downLoadURI);
+          assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), expectedUrl);
           const queryCount = requests.length;
           const detailCount = requests.extra.length;
           let download;
@@ -124,10 +128,10 @@ function gmBridge(overrides) {
             await page.locator("#apkbot-download div a").click();
             download = await manualDownload;
           }
-          assert.equal(download.url(), grant.downLoadURI);
+          assert.equal(download.url(), expectedUrl);
           assert.equal(download.suggestedFilename(), "fixture.apk");
           assert.equal(await download.failure(), null);
-          assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), grant.downLoadURI);
+          assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), expectedUrl);
           assert.equal(requests.length, queryCount, "Downloading uses the ready URL without another query");
           assert.equal(requests.extra.length, detailCount);
         } else {
@@ -145,6 +149,69 @@ function gmBridge(overrides) {
       } finally { await page.close(); }
     }
 
+    await run("CN linked metadata directly selects the anonymous partner lookup without returned product IDs", [xml(linkedMetadata), ods(linkedGrant, "2801")], "ready", async (page, requests) => {
+      assert.deepEqual(requests.map(r => r.url.searchParams.get("reqId")), ["2298", "2801"]);
+      assert.match(requests[1].body, new RegExp(`name="GUID">${packageName.replaceAll(".", "\\.")}<`));
+      assert.match(requests[1].body, /name="tencentSource">general</);
+      assert.match(requests[1].body, /name="lastInterfaceName">searchProductListEx2Notc</);
+      assert.doesNotMatch(requests[1].body, /createOrder|easybuyPurchase|orderForTencent/);
+      assert.equal(await page.locator("#apkbot-download > p:last-child").textContent(), "下载链接失效后，请点击「刷新」。");
+    }, {downloadUrl:linkedUrl});
+    await run("matching optional partner identities remain usable", [xml(linkedMetadata), ods({...linkedGrant, GUID:packageName, productID:metadata.productID}, "2801")], "ready", null, {downloadUrl:linkedUrl});
+    await run("linked metadata retains the normal Samsung CDN trust and omits an unverified expiry", [xml(linkedMetadata), ods({...linkedGrant, downLoadURI:grant.downLoadURI}, "2801")], "ready", async page => {
+      assert.equal(await page.locator("#apkbot-download > p:last-child").textContent(), "下载链接失效后，请点击「刷新」。");
+    });
+    for (const flag of ["", "2", "Y"]) {
+      await run("unknown linked flags stop before any authorization", [xml({...metadata, linkProductYn:flag})], "error", (_, requests) => assert.equal(requests.length, 1));
+    }
+    for (const size of [undefined, "", "0"]) {
+      const incomplete = {...linkedMetadata, realContentsSize:size};
+      if (size === undefined) delete incomplete.realContentsSize;
+      await run("linked products require a positive known full metadata size", [xml(incomplete)], "error", (_, requests) => assert.equal(requests.length, 1));
+    }
+    for (const field of ["version", "versionCode", "contentsSize"]) {
+      const incomplete = {...linkedGrant};
+      delete incomplete[field];
+      await run(`linked partner authorization requires ${field}`, [xml(linkedMetadata), ods(incomplete, "2801")], "error", (_, requests) => assert.equal(requests.length, 2));
+    }
+    for (const mismatch of [{GUID:"com.other.app"}, {productID:"67890"}, {GUID:""}, {productID:""}, {version:"10.0"}, {versionCode:"100"}, {contentsSize:"999"}]) {
+      await run("provided identities, version, code and full size must match linked metadata", [xml(linkedMetadata), ods({...linkedGrant, ...mismatch}, "2801")], "error", (_, requests) => assert.equal(requests.length, 2));
+    }
+    for (const url of ["http://auto-dd.myapp.com/fixture.apk", "https://sub.auto-dd.myapp.com/fixture.apk", "https://auto-dd.myapp.com.example.org/fixture.apk", "https://download.myapp.com/fixture.apk", "https://auto-dd.myapp.com:8443/fixture.apk", "https://user@auto-dd.myapp.com/fixture.apk", "https://auto-dd.myapp.com/fixture.apk#fragment", "https://auto-dd.myapp.com/"]) {
+      await run("linked downloads add only the exact HTTPS partner host with the existing URL guards", [xml(linkedMetadata), ods({...linkedGrant, downLoadURI:url}, "2801")], "error", (_, requests) => assert.equal(requests.length, 2));
+    }
+    for (const nonlinked of [metadata, {...metadata, linkProductYn:"0"}]) {
+      await run("absent or zero linked flags never allow Tencent through native authorization", [xml(nonlinked), xml({...grant, downLoadURI:linkedUrl})], "error", (_, requests) => {
+        assert.deepEqual(requests.map(r => r.url.searchParams.get("reqId")), ["2298", "2311"]);
+      });
+    }
+    await run("US stub authorization cannot borrow the linked Tencent exception", [stub({...us, downloadURI:linkedUrl}), '<SamsungProtocol><errorString errorCode="4002">Denied</errorString></SamsungProtocol>'], "error", (_, requests) => assert.equal(requests.length, 2), {query:"?cntyCd=USA"});
+    await run("explicit US linked metadata never queries the partner endpoint", [stubDenied, xml(linkedMetadata)], "error", (_, requests) => {
+      assert.equal(requests.length, 2);
+      assert.ok(requests.every(r => r.url.hostname !== "cn-ms.galaxyappstore.com" && r.url.searchParams.get("reqId") !== "2801"));
+    }, {query:"?cntyCd=USA"});
+    await run("AUTO refuses the US linked path before selecting an explicitly linked CN catalog", [stubDenied, xml(linkedMetadata), xml(linkedMetadata), ods(linkedGrant, "2801")], "ready", (_, requests) => {
+      assert.deepEqual(requests.map(r => r.url.searchParams.get("reqId")), [null, "2298", "2298", "2801"]);
+      assert.equal(requests[1].url.hostname, "us-odc.samsungapps.com");
+      assert.equal(requests[2].url.hostname, "cn-ms.galaxyappstore.com");
+      assert.equal(requests[3].url.hostname, "cn-ms.galaxyappstore.com");
+    }, {query:"", downloadUrl:linkedUrl});
+    await run("refreshing a linked card does not retain Tencent permission after metadata becomes native", [xml(linkedMetadata), ods(linkedGrant, "2801"), xml({...metadata, linkProductYn:"0"}), xml(grant)], "ready", async (page, requests) => {
+      await page.locator("#apkbot-download button").click();
+      await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').textContent === "下载链接已更新。");
+      assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), grant.downLoadURI);
+      assert.equal(await page.locator("#apkbot-download > p:last-child").textContent(), "下载链接有效期约为 10 分钟，失效后请点击「刷新」。");
+      assert.deepEqual(requests.map(r => r.url.searchParams.get("reqId")), ["2298", "2801", "2298", "2311"]);
+    }, {downloadUrl:linkedUrl});
+    await run("a mismatched linked refresh preserves the previous validated card and URL", [xml(linkedMetadata), ods(linkedGrant, "2801"), xml(linkedMetadata), ods({...linkedGrant, versionCode:"100"}, "2801")], "ready", async (page, requests) => {
+      const before = await page.locator("#apkbot-download p:nth-of-type(2)").textContent();
+      await page.locator("#apkbot-download button").click();
+      await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').textContent.startsWith("下载链接更新失败："));
+      assert.equal(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), before);
+      assert.equal(await page.locator("#apkbot-download div a").getAttribute("href"), linkedUrl);
+      assert.equal(await page.locator("#apkbot-download > p:last-child").textContent(), "下载链接失效后，请点击「刷新」。");
+      assert.equal(requests.length, 4);
+    }, {downloadUrl:linkedUrl});
     const nestedStub = stub(us).replace("<productId>", "<alternativeProduct><productId>").replace("</downloadURI>", "</downloadURI></alternativeProduct>");
     await run("nested stub fields cannot authorize another product branch", [nestedStub, '<SamsungProtocol><errorString errorCode="4002">Denied</errorString></SamsungProtocol>'], "error", (_, requests) => {
       assert.equal(requests.length, 2);
@@ -348,6 +415,7 @@ function gmBridge(overrides) {
       assert.deepEqual(requests.map(r => r.url.searchParams.get("reqId")), [null, "2298", "2311", "2316"]);
     }, {query:"?cntyCd=USA"});
     const mirrorGrant = {...grant, GUID:packageName};
+    await run("a nonlinked partner fallback still rejects the Tencent download host", [xml(metadata), denied, denied, ods({...mirrorGrant, downLoadURI:linkedUrl}, "2801")], "error", (_, requests) => assert.equal(requests.length, 4));
     await run("CN partner fallback is bounded and requires the same full Samsung package", [xml(metadata), denied, denied, ods(mirrorGrant, "2801")], "ready", (_, requests) => {
       assert.deepEqual(requests.map(r => r.url.searchParams.get("reqId")), ["2298", "2311", "2316", "2801"]);
       assert.match(requests[3].body, /name="tencentSource">general</);

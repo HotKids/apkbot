@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Galaxy Store APK 下载
 // @namespace    https://github.com/HotKids/apkbot
-// @version      1.3.0
-// @description  在 Galaxy Store 应用详情页获取 Samsung APK 下载链接。
+// @version      1.3.1
+// @description  在 Galaxy Store 应用详情页获取 APK 下载链接。
 // @match        https://galaxystore.samsung.com/detail/*
 // @match        https://apps.galaxyappstore.com/detail/*
 // @grant        GM_xmlhttpRequest
@@ -199,11 +199,12 @@
     return fields;
   }
 
-  function downloadUrl(value) {
+  function downloadUrl(value, linked = false) {
     let url;
     try { url = new URL(value); } catch { throw new StoreError("三星商店返回的下载地址无效，请稍后重试。"); }
     const host = url.hostname;
-    if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") || url.hash || !url.pathname.split("/").some(Boolean) || /[\x00-\x20\s\\]/.test(value) || !(host === "galaxystore.samsung.com" || ["samsungapps.com", "galaxyappstore.com"].some(suffix => host === suffix || host.endsWith("." + suffix)))) throw new StoreError("三星商店返回的下载地址无效，请稍后重试。");
+    const trustedHost = host === "galaxystore.samsung.com" || ["samsungapps.com", "galaxyappstore.com"].some(suffix => host === suffix || host.endsWith("." + suffix)) || (linked && host === "auto-dd.myapp.com");
+    if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") || url.hash || !url.pathname.split("/").some(Boolean) || /[\x00-\x20\s\\]/.test(value) || !trustedHost) throw new StoreError("三星商店返回的下载地址无效，请稍后重试。");
     return url.href;
   }
 
@@ -216,7 +217,7 @@
     checkPackage();
     if (fields.resultCode !== "1") throw new StoreError("三星商店未返回可用结果，请稍后重试。");
     if (fields.appId !== packageName || !/^\d{1,30}$/.test(fields.productId || "") || !fields.versionName || !positive(fields.versionCode) || !positive(fields.contentSize)) throw new StoreError("三星商店返回的应用信息不完整，请稍后重试。");
-    return {name:fields.productName || packageName, productId:fields.productId, version:fields.versionName, versionCode:fields.versionCode, size:fields.contentSize, region:"US", url:downloadUrl(fields.downloadURI)};
+    return {name:fields.productName || packageName, productId:fields.productId, version:fields.versionName, versionCode:fields.versionCode, size:fields.contentSize, region:"US", linked:false, url:downloadUrl(fields.downloadURI)};
   }
 
   async function odsDownload(region) {
@@ -228,8 +229,12 @@
       mode:"directDownload", guid:packageName, productID:"", imei:identity, extuk:identity,
       stduk:identity, predeployed:"0", unifiedPaymentYN:"Y", lkAppIncludedYN:"Y",
       betaTestYN:"N", minorYN:"N", stateCode:""
-    }, ["GUID", "productID", "productName", "version", "versionCode", "realContentsSize", "needToLogin", "installableYN"]);
+    }, ["GUID", "productID", "productName", "version", "versionCode", "realContentsSize", "needToLogin", "installableYN", "linkProductYn"]);
     if (metadata.GUID !== packageName || !/^\d{1,30}$/.test(metadata.productID || "") || !metadata.version || !positive(metadata.versionCode) || (metadata.realContentsSize && !positive(metadata.realContentsSize))) throw new StoreError("三星商店返回的应用信息不完整，请稍后重试。");
+    if (Object.hasOwn(metadata, "linkProductYn") && !["0", "1"].includes(metadata.linkProductYn)) throw new StoreError("三星商店返回的应用信息不完整，请稍后重试。");
+    const linked = metadata.linkProductYn === "1";
+    if (linked && region !== "CN") throw new StoreError("当前地区无法获取此应用的下载链接，请指定 CN 后重试。");
+    if (linked && !positive(metadata.realContentsSize)) throw new StoreError("三星商店返回的下载信息不完整，请稍后重试。");
     if (metadata.needToLogin === "1") throw new StoreError("此版本需要登录 Samsung 账户，当前无法获取下载链接。");
     if (metadata.needToLogin !== "0" || metadata.installableYN !== "Y") throw new StoreError("当前无法获取此版本的下载链接。");
     checkPackage();
@@ -240,8 +245,15 @@
       autoUpdateYN:"N", predeployed:"0", resumeYN:"N"
     };
     const keys = ["GUID", "productID", "version", "versionCode", "contentsSize", "downLoadURI"];
+    const partnerParams = {
+      stduk:identity, extuk:identity, GUID:packageName, tencentSource:"general",
+      lastInterfaceName:"searchProductListEx2Notc"
+    };
     let grant, usedRestore = false, usedMirror = false;
-    try {
+    if (linked) {
+      // The linked lookup's appId is internal; bind its version and full size to the requested GUID.
+      grant = await request(region, "downloadInfoForTencent", "2801", partnerParams, keys);
+    } else try {
       // Request the full APK without assuming a locally installed version.
       grant = await request(region, "downloadEx2", "2311", {...params, dowloadType:"new", deepLinkSource:"N"}, keys);
     } catch (error) {
@@ -254,18 +266,15 @@
         if (region !== "CN" || !(restoreError instanceof HttpStatusError || restoreError instanceof ServiceError)) throw restoreError;
         checkPackage();
         // The partner endpoint is usable only when it proves the same full Samsung package.
-        grant = await request(region, "downloadInfoForTencent", "2801", {
-          stduk:identity, extuk:identity, GUID:packageName, tencentSource:"general",
-          lastInterfaceName:"searchProductListEx2Notc"
-        }, keys);
+        grant = await request(region, "downloadInfoForTencent", "2801", partnerParams, keys);
         usedMirror = true;
       }
     }
-    if (grant.productID !== metadata.productID || ((usedMirror || Object.hasOwn(grant, "GUID")) && grant.GUID !== packageName) || ((!usedRestore || usedMirror || Object.hasOwn(grant, "version")) && grant.version !== metadata.version) || ((!usedRestore || usedMirror || Object.hasOwn(grant, "versionCode")) && positive(grant.versionCode) !== positive(metadata.versionCode))) throw new StoreError("下载信息与查询到的版本不一致，请重试。");
+    if (((!linked || Object.hasOwn(grant, "productID")) && grant.productID !== metadata.productID) || (((!linked && usedMirror) || Object.hasOwn(grant, "GUID")) && grant.GUID !== packageName) || ((!usedRestore || usedMirror || Object.hasOwn(grant, "version")) && grant.version !== metadata.version) || ((!usedRestore || usedMirror || Object.hasOwn(grant, "versionCode")) && positive(grant.versionCode) !== positive(metadata.versionCode))) throw new StoreError("下载信息与查询到的版本不一致，请重试。");
     if ((usedMirror && !positive(metadata.realContentsSize)) || !positive(grant.contentsSize) || (metadata.realContentsSize && positive(grant.contentsSize) !== positive(metadata.realContentsSize))) throw new StoreError("三星商店返回的下载信息不匹配，请重试。");
     const uri = grant.downLoadURI;
     if (!uri) throw new StoreError("三星商店返回的下载信息不完整，请稍后重试。");
-    return {name:metadata.productName || packageName, productId:metadata.productID, version:metadata.version, versionCode:metadata.versionCode, size:grant.contentsSize, region, url:downloadUrl(uri)};
+    return {name:metadata.productName || packageName, productId:metadata.productID, version:metadata.version, versionCode:metadata.versionCode, size:grant.contentsSize, region, linked, url:downloadUrl(uri, linked)};
   }
 
   async function regionDownload(region) {
@@ -348,7 +357,7 @@
       status.dataset.state = "ready";
       refresh.hidden = false;
       status.textContent = isRefresh ? "下载链接已更新。" : "已获取下载链接。若未开始下载，请点击「下载」。";
-      hint.textContent = "下载链接有效期约为 10 分钟，失效后请点击「刷新」。";
+      hint.textContent = result.linked ? "下载链接失效后，请点击「刷新」。" : "下载链接有效期约为 10 分钟，失效后请点击「刷新」。";
       if (!isRefresh) action.click();
     } catch (error) {
       const latestPackage = readPackage();

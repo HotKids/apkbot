@@ -1,6 +1,7 @@
 import sqlite3
 import json
 from dataclasses import asdict
+import pytest
 import database as db
 from galaxy_store import AppRequest
 from tests.test_galaxy_store import release
@@ -87,9 +88,13 @@ def test_resubscription_resets_notification_only_for_that_user():
     assert db.pending_subscribers(app, release()) == [1]
 
 
-def test_legacy_cache_without_update_date_still_loads():
+@pytest.mark.parametrize("missing", [
+    ("updated_date",), ("linked_product",), ("updated_date", "linked_product"),
+])
+def test_legacy_cache_without_optional_store_fields_still_loads(missing):
     values = asdict(release())
-    del values["updated_date"]
+    for field in missing:
+        del values[field]
     assert db.cached_release({"release_json": json.dumps(values)}) == release()
 
 
