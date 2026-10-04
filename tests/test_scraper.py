@@ -42,6 +42,13 @@ def session(*responses):
     return Mock(request=Mock(side_effect=list(responses)))
 
 
+@pytest.fixture(autouse=True)
+def fixed_ods_endpoints(monkeypatch):
+    # Endpoint discovery has its own transport tests; these fixtures describe
+    # the metadata/authorization response sequence after regional resolution.
+    monkeypatch.setattr(scraper.GalaxyStore, "_endpoint", lambda self, region: scraper.ODS_ENDPOINTS[region])
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -127,20 +134,22 @@ def test_cn_metadata_does_not_authorize_download():
     [StubRestricted("restricted"), ServiceError("unknown"), TransportError("network")],
 )
 @pytest.mark.parametrize("region", ["AUTO", "US"])
-def test_auto_falls_back_after_us_query_error_but_explicit_us_does_not(
-    monkeypatch, failure, region
-):
+def test_us_stub_error_tries_same_region_ods_before_switching(monkeypatch, failure, region):
     store = scraper.GalaxyStore(Mock())
     monkeypatch.setattr(store, "stub", Mock(side_effect=failure))
     post = Mock(return_value=metadata())
     monkeypatch.setattr(store, "_ods", post)
+    assert store.metadata(AppRequest("com.example.app", region)).region == "US"
+    assert post.call_args.kwargs["region"] == "US"
+    post.reset_mock()
+    post.side_effect = [failure, metadata()] if region == "AUTO" else failure
     if region == "AUTO":
         assert store.metadata(AppRequest("com.example.app")).region == "CN"
-        post.assert_called_once()
+        assert [c.kwargs["region"] for c in post.call_args_list] == ["US", "CN"]
     else:
         with pytest.raises(type(failure)):
             store.metadata(AppRequest("com.example.app", "US"))
-        post.assert_not_called()
+        assert post.call_count == 1
 
 
 def test_auto_prefers_us_and_falls_back_on_absence(monkeypatch):
@@ -152,11 +161,13 @@ def test_auto_prefers_us_and_falls_back_on_absence(monkeypatch):
     assert store.metadata(AppRequest("com.example.app")).region == "US"
     post.assert_not_called()
     stub.side_effect = NoAvailableVersion("region")
+    post.side_effect = [NoAvailableVersion("region"), metadata()]
     assert store.metadata(AppRequest("com.example.app")).region == "CN"
     post.reset_mock()
+    post.side_effect = NoAvailableVersion("region")
     with pytest.raises(NoAvailableVersion):
         store.metadata(AppRequest("com.example.app", "US"))
-    post.assert_not_called()
+    post.assert_called_once()
 
 
 @pytest.mark.parametrize("region", ["AUTO", "US"])
@@ -179,16 +190,12 @@ def test_download_link_retries_cn_when_us_authorization_fails(region):
         ),
     )
     store = scraper.GalaxyStore(http)
-    if region == "US":
-        with pytest.raises(InvalidResponse):
-            store.download_link(AppRequest("com.example.app", region))
-        assert http.request.call_count == 1
-    else:
-        grant = store.download_link(AppRequest("com.example.app"))
-        assert grant.release.region == "CN" and grant.url == url
-        assert http.request.call_count == 3
-        assert "reqId=2298" in http.request.call_args_list[1].args[1]
-        assert "reqId=2311" in http.request.call_args_list[2].args[1]
+    grant = store.download_link(AppRequest("com.example.app", region))
+    assert grant.release.region == "US" and grant.url == url
+    assert http.request.call_count == 3
+    assert "us-odc.samsungapps.com" in http.request.call_args_list[1].args[1]
+    assert "reqId=2298" in http.request.call_args_list[1].args[1]
+    assert "reqId=2311" in http.request.call_args_list[2].args[1]
 
 
 def test_download_link_reuses_the_us_stub_answer():
@@ -219,10 +226,11 @@ def test_download_link_does_not_loop_when_both_regions_fail():
         Response(metadata()),
         Response(ods(error="Service error", code="-1")),
         Response(ods(error="Service error", code="-1")),
+        Response(ods(error="Service error", code="-1")),
     )
     with pytest.raises(ServiceError):
         scraper.GalaxyStore(http).download_link(AppRequest("com.example.app"))
-    assert http.request.call_count == 4
+    assert http.request.call_count == 5
 
 
 def test_cn_download_link_uses_metadata_then_stateless_full_package_authorization():
@@ -316,10 +324,11 @@ def test_cn_authorization_does_not_loop_after_restore_rejection():
     http = session(
         Response(ods(error="Service error", code="-1")),
         Response(ods(error="Login required", code="-1")),
+        Response(ods(error="Service error", code="4002")),
     )
-    with pytest.raises(LoginRequired):
+    with pytest.raises(ServiceError):
         scraper.GalaxyStore(http).authorize(release())
-    assert http.request.call_count == 2
+    assert http.request.call_count == 3
 
 
 def test_login_and_installability_block_authorization(monkeypatch):
@@ -351,5 +360,5 @@ def test_details_json_binding_and_ambiguity():
 
 
 def test_website_unavailable_keeps_download_metadata():
-    store = scraper.GalaxyStore(session(Response(b"Unavailable", status=503)))
+    store = scraper.GalaxyStore(session(Response(b"Unavailable", status=503), Response(status=503)))
     assert store.details(release()) == (release(), None)

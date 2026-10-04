@@ -72,7 +72,7 @@ def test_check_summary_reports_queries_without_claiming_delivery(
     monkeypatch, transport
 ):
     db.add_subscription(100, AppRequest("com.example.app"))
-    monkeypatch.setattr(handlers, "check_app", Mock())
+    fake_store(monkeypatch)
     handlers.run_check_all(triggered_by=100)
     assert (
         transport[0].send_message.call_args.args[1]

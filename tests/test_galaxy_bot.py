@@ -38,6 +38,8 @@ def fake_store(monkeypatch, selected=None):
     store.authorize.return_value = DownloadGrant(
         store.metadata.return_value, SIGNED_URL, store.metadata.return_value.size or 42
     )
+    store.batch_updates.return_value = {}
+    store.ods_metadata.side_effect = ServiceError("Synthetic same-region ODS rejection")
     store.download_link.side_effect = lambda app: GalaxyStore.download_link(store, app)
     factory = Mock()
     factory.return_value.__enter__ = Mock(return_value=store)
@@ -309,7 +311,8 @@ def test_failed_source_check_preserves_cached_version(monkeypatch, transport):
     store.metadata.side_effect = ServiceError("Service error")
     handlers.run_check_all()
     assert db.cached_release(db.get_subscriptions()[0]) == release()
-    assert db.pending_subscribers(app, release()) == [100]
+    assert db.pending_subscribers(app, release()) == []
+    transport[1].send.assert_called_once()
 
 
 @pytest.mark.parametrize("size", [85_193_594, 3_000_000_000])
@@ -436,8 +439,9 @@ def test_cn_bot_card_authorizes_but_never_requests_apk(
             downLoadURI=SIGNED_URL,
         )
     )
-    responses = [Response(metadata()), Response(grant), Response(b"{}")]
+    responses = [Response(metadata()), Response(grant), Response(status=503), Response(b"{}")]
     if region == "AUTO":
+        responses.insert(0, Response(ods(error="Unavailable", code="4002")))
         responses.insert(
             0,
             Response(
@@ -446,13 +450,15 @@ def test_cn_bot_card_authorizes_but_never_requests_apk(
         )
     http = session(*responses)
     store = GalaxyStore(http)
+    store._endpoints = {"CN": "https://cn-ms.galaxyappstore.com/ods.as", "US": "https://us-odc.samsungapps.com/ods.as"}
     monkeypatch.setattr(handlers, "GalaxyStore", lambda: store)
     handlers._link_once(100, AppRequest("com.example.app", region), 5)
     calls = http.request.call_args_list
     if region == "AUTO":
         assert calls[0].args[0] == "GET" and "stubDownload" in calls[0].args[1]
-        calls = calls[1:]
-    assert len(calls) == 3
+        assert "us-odc.samsungapps.com" in calls[1].args[1]
+        calls = calls[2:]
+    assert len(calls) == 4
     assert calls[0].args == (
         "POST",
         "https://cn-ms.galaxyappstore.com/ods.as?reqId=2298&ot=01&ct=B",
@@ -462,6 +468,10 @@ def test_cn_bot_card_authorizes_but_never_requests_apk(
         "https://cn-ms.galaxyappstore.com/ods.as?reqId=2311&ot=01&ct=B",
     )
     assert calls[2].args == (
+        "POST",
+        "https://cn-ms.galaxyappstore.com/ods.as?reqId=2290&ot=01&ct=B",
+    )
+    assert calls[3].args == (
         "GET",
         "https://galaxystore.samsung.com/api/detail/com.example.app?cntyCd=CHN",
     )

@@ -178,6 +178,12 @@ def cache_release(app, release, notes):
         )
 
 
+def app_cache(app):
+    with db_conn() as db:
+        row = db.execute("SELECT * FROM galaxy_apps WHERE app_key=?", (app.key,)).fetchone()
+    return (cached_release(row), row["notes"]) if row else (None, None)
+
+
 def notified_code(identity):
     # last_notified holds Release.identity (region:product:versionCode) or ''.
     code = identity.rpartition(":")[2]

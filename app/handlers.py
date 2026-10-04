@@ -3,6 +3,7 @@
 from html import escape
 import logging
 import threading
+from dataclasses import replace
 
 import telebot
 from telebot.types import (
@@ -191,25 +192,37 @@ def start_link(
         raise
 
 
-def check_app(app):
-    # Scheduled checks never request downloadForRestore (2316) or APK bytes.
-    with GalaxyStore() as store:
-        release = store.metadata(app)
-        release, notes = store.details(release)
-    db.cache_release(app, release, notes)
+def notify_release(app, release, notes):
     for chat_id in db.pending_subscribers(app, release):
         if not allowed_user(chat_id):
             continue
         try:
-            messages.send(
-                chat_id,
-                release_card(release, notes, update=True),
-                keyboard(app),
-            )
+            messages.send(chat_id, release_card(release, notes, update=True), keyboard(app))
         except Exception:
             logger.warning("Notification unconfirmed; subscriber remains pending")
         else:
             db.mark_notified(chat_id, app, release)
+
+
+def _check_app(app, store, selected=None):
+    previous, previous_notes = db.app_cache(app)
+    selected = selected or store.metadata(app)
+    if (previous and selected.identity == previous.identity
+        and selected.version_name == previous.version_name and selected.size == previous.size
+        and previous.updated_date is not None):
+        # Already matched details remain valid for this exact store version.
+        selected = replace(selected, updated_date=previous.updated_date)
+        notes = previous_notes
+    else:
+        selected, notes = store.details(selected)
+    db.cache_release(app, selected, notes)
+    notify_release(app, selected, notes)
+
+
+def check_app(app):
+    # Scheduled checks never authorize downloads or request APK bytes.
+    with GalaxyStore() as store:
+        _check_app(app, store)
 
 
 def run_check_all(triggered_by=None):
@@ -219,18 +232,44 @@ def run_check_all(triggered_by=None):
         return
     succeeded = failed = 0
     try:
-        for app in db.subscribed_apps():
-            try:
-                check_app(app)
-                succeeded += 1
-            except Exception:
-                failed += 1
-                logger.warning("Source check failed; previous cached state preserved")
+        apps = db.subscribed_apps()
+        batch = {}
+        if apps:
+            with GalaxyStore() as store:
+                for region in ("US", "CN"):
+                    groups = {}
+                    for app in apps:
+                        baseline, _ = db.app_cache(app)
+                        requested = "CN" if app.region == "CN" else "US"
+                        if requested == region and baseline and baseline.region == region and baseline.version_code > 0:
+                            previous = groups.get(app.package)
+                            if previous is None or baseline.version_code < previous.version_code:
+                                groups[app.package] = baseline
+                    if groups:
+                        try:
+                            batch[region] = store.batch_updates(list(groups.values()), region)
+                        except StoreError:
+                            logger.warning("Batch update query failed; checking applications individually")
+                for app in apps:
+                    try:
+                        region = "CN" if app.region == "CN" else "US"
+                        row = batch.get(region, {}).get(app.package)
+                        # A missing/partial row says nothing about availability.
+                        # The single-app path also preserves AUTO's US→CN policy.
+                        try:
+                            selected = store.update_metadata(row) if row else None
+                        except StoreError:
+                            selected = None
+                        _check_app(app, store, selected)
+                        succeeded += 1
+                    except Exception:
+                        failed += 1
+                        cached, notes = db.app_cache(app)
+                        if cached:
+                            notify_release(app, cached, notes)
+                        logger.warning("Source check failed; previous cached state preserved")
         if triggered_by:
-            bot.send_message(
-                triggered_by,
-                f"更新检查已完成。{succeeded} 项查询成功，{failed} 项查询失败。",
-            )
+            bot.send_message(triggered_by, f"更新检查已完成。{succeeded} 项查询成功，{failed} 项查询失败。")
     finally:
         check_lock.release()
 
