@@ -10,7 +10,7 @@ Samsung Galaxy Store APK 下载与版本订阅工具。支持 Telegram bot，并
 | 浏览器书签 | 中国区三星生活助手 | [书签网址](samsung-assistant/bookmarklet.txt) · [HTML 安装页](samsung-assistant/install.html) |
 | Python 脚本 | 中国区三星生活助手 | [download.py](samsung-assistant/download.py) |
 
-独立下载方式详见 [使用说明](samsung-assistant/README.md)。HTML 和 Python 文件须在 GitHub 文件页下载原始文件；书签网址可直接复制原文。**浏览器书签请使用安卓 Chrome 下载。** Python 需 3.8 或更新版本。
+独立下载方式详见 [使用说明](samsung-assistant/README.md)。HTML 和 Python 文件须在 GitHub 文件页下载原始文件；书签网址可直接复制原文。浏览器建议使用 Chrome，Python 需 3.8 或更新版本。
 
 下载链接有效期约为 10 分钟。失效后，bot 用户点击「刷新」，书签用户重新运行书签，Python 用户重新运行脚本。部分应用受地区、设备或账户限制，无法保证所有请求均可下载。
 
