@@ -1,18 +1,6 @@
 # apkbot
 
-Samsung Galaxy Store APK 下载与版本订阅工具。支持 Telegram bot，并提供三星生活助手的浏览器书签及 Python 下载脚本。APK 由三星直接传输至用户设备。
-
-## 使用方式
-
-| 方式 | 适用范围 | 入口 |
-| --- | --- | --- |
-| Telegram bot | Galaxy Store 应用查询、下载及更新订阅 | [命令说明](#telegram-命令) |
-| 浏览器书签 | 中国区三星生活助手 | [书签网址](samsung-assistant/bookmarklet.txt) · [HTML 安装页](samsung-assistant/install.html) |
-| Python 脚本 | 中国区三星生活助手 | [download.py](samsung-assistant/download.py) |
-
-独立下载方式详见 [使用说明](samsung-assistant/README.md)。HTML 和 Python 文件须在 GitHub 文件页下载原始文件；书签网址可直接复制原文。浏览器建议使用 Chrome，Python 需 3.8 或更新版本。
-
-下载链接有效期约为 10 分钟。失效后，bot 用户点击「刷新」，书签用户重新运行书签，Python 用户重新运行脚本。部分应用受地区、设备或账户限制，无法保证所有请求均可下载。
+用于查询 Samsung Galaxy Store 应用、获取 APK 下载链接及订阅版本更新的 Telegram bot。APK 由用户设备直接从 Samsung 服务器下载。
 
 ## Telegram 命令
 
@@ -38,9 +26,11 @@ com.samsung.android.app.sreminder CN
 
 未指定地区时依次尝试 US、CN；指定地区时仅查询对应商店。订阅首次检查成功后通知当前可用版本，后续按版本代码判断更新，地区切换本身不视为更新。默认每 24 小时检查，启动约 1 分钟后执行首次检查。
 
+下载链接有效期约为 10 分钟，失效后请点击「刷新」重新获取。部分应用受地区、设备或账户限制，无法保证所有请求均可下载。
+
 ## 首次部署
 
-服务器需安装 Git、[Docker Engine 与 Compose 插件](https://docs.docker.com/engine/install/)，并可访问 Telegram 和三星商店。无需域名或开放入站端口。仅使用独立下载脚本时，无需部署 bot。
+服务器需安装 Git、[Docker Engine 与 Compose 插件](https://docs.docker.com/engine/install/)，并可访问 Telegram 和三星商店。无需域名或开放入站端口。
 
 ```sh
 git clone https://github.com/HotKids/apkbot.git
@@ -105,3 +95,5 @@ docker compose up -d --build
 ```sh
 docker compose down
 ```
+
+另提供[三星生活助手独立下载工具](samsung-assistant/README.md)，支持浏览器书签及 Python 脚本。
