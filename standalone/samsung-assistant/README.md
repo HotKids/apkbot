@@ -1,86 +1,38 @@
-# Samsung Assistant direct download
+# 三星生活助手下载
 
-These standalone clients request the current CN release of Samsung Assistant
-(`com.samsung.android.app.sreminder`) and a fresh download grant from Samsung.
-The APK goes directly from Samsung to the browser or Python client. They do not
-use Telegram, bot configuration, a proxy, or an APK parsing service.
+通过浏览器书签或 Python 脚本下载三星生活助手（包名：`com.samsung.android.app.sreminder`）。两种方式均固定使用中国区商店，获取最新版本和新的下载链接，APK 由设备直接从 Samsung 下载。
 
-## Android browser
+## 安卓浏览器书签
 
-Open `install.html` to copy the bookmark URL and follow the steps on that page.
-Alternatively, copy the complete single line from `bookmarklet.txt`.
+1. 在 GitHub 打开 [bookmarklet.txt](bookmarklet.txt)，点击 **Copy raw file（复制原始文件）**，复制以 `javascript:` 开头的完整单行内容。也可打开原始文件内容后全选复制。
+2. 在 Chrome 中将任意页面保存为书签，名称设为 **三星生活助手下载**。编辑该书签，将网址完整替换为刚复制的内容。
+3. 打开 [三星页面](https://cn-ms.galaxyappstore.com/)。页面空白属正常现象。
+4. 在地址栏输入 **三星生活助手下载**，选择对应的书签建议执行。等待应用信息显示后，点击 **下载**。
 
-1. In Chrome, save any page as a bookmark named **三星生活助手下载**.
-2. Edit that bookmark and replace its entire address with the copied
-   `javascript:...` URL. Do not paste it into the address bar to run it.
-3. Open <https://cn-ms.galaxyappstore.com/>. A blank page is normal.
-4. Type **三星生活助手下载** into the address bar and select its bookmark suggestion.
-5. Wait for the app information, then tap **下载**. If the link expires,
-   run the bookmark again to request a new one.
+代码应保存到书签的网址字段，通过书签建议执行。下载链接有效期约为 10 分钟，失效或请求失败时，再次运行书签以获取新链接。
 
-The bookmark and installation page display Simplified Chinese.
+也可使用中文说明页：在 GitHub 打开 [install.html](install.html)，点击 **Download raw file（下载原始文件）**，保存为 `install.html`。在支持打开本地 HTML 的浏览器中打开文件，点击 **复制书签网址**，再从第 2 步继续。若手机无法打开这个文件，使用上面的 `bookmarklet.txt` 方式即可。
 
-The bookmark runs on Samsung's origin so that its requests are same-origin.
-Running an ordinary local HTML page cannot read these responses across origins.
-No browser security setting needs to be changed.
+## Python 下载
 
-[Chrome's Android help](https://support.google.com/chrome/answer/188842?co=GENIE.Platform%3DAndroid&hl=en)
-documents bookmark creation and editing. [Chromium's security FAQ](https://github.com/chromium/chromium/blob/main/docs/security/faq.md)
-documents bookmarklet execution and the protection applied to pasted scripts.
-Samsung Internet bookmarklet execution and the phone's actual bookmark-editing
-flow remain **unverified**.
+在 GitHub 打开 [download.py](download.py)，点击 **Download raw file（下载原始文件）** 保存，使用 Python 3.8 或更新版本运行。脚本只使用标准库，无需安装额外 Python 包，也无需 Telegram 或 bot 配置。安卓需先准备 Python 运行环境（例如 Termux），并确保能够读写下载目录。
 
-## Python fallback
-
-Copy `download.py` to a device with Python 3.8 or newer. It uses only the Python
-standard library; no `pip install`, bot files, or environment configuration is
-required. In an Android Python runner such as Termux, run:
+在终端进入 `download.py` 所在目录，运行：
 
 ```sh
 python3 download.py
 ```
 
-To choose an existing writable directory:
+默认保存到当前目录。指定其他已存在、可写的目录：
 
 ```sh
 python3 download.py --output-dir /path/to/downloads
 ```
 
-The script queries the current release, gets a new grant and immediately
-downloads `Samsung-Assistant_<version>_<versionCode>.apk`. It exclusively creates
-the output and refuses to overwrite an existing file. Wait for `Downloaded:`
-before using the APK. It verifies the received byte count against the grant and
-removes its incomplete output if an ordinary failure occurs. If the process is
-forcibly killed or the device shuts down, an incomplete APK may remain; delete
-that file before retrying. The transfer has a finite deadline and
-accepts only HTTPS Samsung download addresses and redirects. Signed URLs and
-response bodies are not printed.
+文件名为 `Samsung-Assistant_<版本>_<版本代码>.apk`。等待终端显示 `Downloaded:` 后再使用文件。
 
-## Validation and limits
+- 同名文件已存在时，脚本会停止，不会覆盖。需要重新下载时，请先自行删除该文件。
+- 普通下载失败会清理本次未完成的文件，可重新运行。
+- 强制关闭进程或设备关机可能留下不完整 APK，请删除该文件后重试。
 
-On 2026-10-04, desktop Chrome with an Android user agent queried version
-**9.4.02.7**, obtained a fresh grant and saved the complete **106,232,505-byte**
-APK through the download button. This is desktop browser evidence; execution on
-a physical Android phone remains **unverified**. It does not establish that an
-older 403 issue is resolved. Browser downloads rely on the browser's download
-manager; the bookmark does not inspect the downloaded APK.
-
-The Python fallback also completed a live desktop download of the same release
-and byte count on 2026-10-04. The repository's 286 offline Python tests, including
-37 standalone-client cases, passed. Fourteen offline browser checks and Ruff
-also passed. The tests exercise the protocol, error and file-handling paths with
-synthetic responses. A live Python download on Android remains **unverified**.
-
-For maintainers, regenerate the copyable artifacts after changing `browser.js`:
-
-```sh
-python3 standalone/samsung-assistant/build_bookmarklet.py
-```
-
-The offline browser check requires Playwright and its Chromium runtime. Set
-`CHROME_BINARY` to use an already installed Chrome instead:
-
-```sh
-node standalone/samsung-assistant/test_browser.cjs
-pytest tests/test_assistant_download.py
-```
+安卓真机及 Samsung Internet 的运行情况尚未验证。
