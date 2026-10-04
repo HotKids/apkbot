@@ -2,6 +2,8 @@
 
 下载中国区三星生活助手（`com.samsung.android.app.sreminder`）的最新版本。支持浏览器书签和 Python 脚本，APK 由设备直接从 Samsung 下载。
 
+建议使用 Universal Installer，将安装来源设为三星应用商店后安装，以避免出现权限无法开启的情况。
+
 ## 浏览器书签
 
 1. 打开 [bookmarklet.txt](bookmarklet.txt)，点击 **Copy raw file（复制原始文件）**，复制以 `javascript:` 开头的完整单行内容。
