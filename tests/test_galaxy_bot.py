@@ -642,6 +642,7 @@ def test_real_application_startup_and_shutdown_with_polling_stub(monkeypatch):
     monkeypatch.setattr(handlers.bot, "stop_polling", Mock())
     monkeypatch.setattr(handlers.bot, "get_me", Mock(return_value=NS(id=123456)))
     monkeypatch.setattr(handlers.bot, "get_webhook_info", Mock(return_value=NS(url="")))
+    monkeypatch.setattr(handlers.bot, "set_my_commands", Mock(return_value=True))
     main.main()
     bind.assert_not_called()
     assert not schedulers[0].running
@@ -682,6 +683,7 @@ def test_sigterm_stops_polling_and_restores_signal_handler(monkeypatch):
     previous = signal.getsignal(signal.SIGTERM)
     monkeypatch.setattr(handlers.bot, "get_me", Mock(return_value=NS(id=123456)))
     monkeypatch.setattr(handlers.bot, "get_webhook_info", Mock(return_value=NS(url="")))
+    monkeypatch.setattr(handlers.bot, "set_my_commands", Mock(return_value=True))
     stop = Mock()
     monkeypatch.setattr(handlers.bot, "stop_polling", stop)
 

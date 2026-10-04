@@ -3,7 +3,39 @@ import logging
 import signal
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
+from telebot.types import (
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+)
 import config
+
+
+def register_commands(bot):
+    public = [
+        BotCommand("dl", "获取下载链接"),
+        BotCommand("sub", "订阅应用更新"),
+        BotCommand("unsub", "取消订阅"),
+        BotCommand("list", "查看我的订阅"),
+    ]
+    owner = public + [
+        BotCommand("check", "检查订阅更新"),
+        BotCommand("status", "查看所有用户的订阅"),
+        BotCommand("add", "将用户加入白名单"),
+        BotCommand("del", "将用户移出白名单"),
+        BotCommand("user", "查看白名单"),
+        BotCommand("help", "查看帮助"),
+    ]
+    # Chat scopes replace the private-chat list, so the owner needs both sets.
+    try:
+        for scope, commands in (
+            (BotCommandScopeAllPrivateChats(), public),
+            (BotCommandScopeChat(config.OWNER_ID), owner),
+        ):
+            if bot.set_my_commands(commands, scope=scope) is not True:
+                raise RuntimeError("Command registration was not confirmed")
+    except Exception:
+        raise RuntimeError("命令菜单注册未确认，请稍后重新启动。") from None
 
 
 def main():
@@ -26,6 +58,7 @@ def main():
         raise RuntimeError(
             "此 Bot 设置了 webhook，请先调用 deleteWebhook 删除后再启动。"
         )
+    register_commands(bot)
     init_db()
     scheduler = BackgroundScheduler(timezone=config.TZ)
     scheduler.add_job(
