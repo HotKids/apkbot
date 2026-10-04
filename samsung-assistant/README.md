@@ -1,6 +1,6 @@
 # 三星生活助手下载
 
-下载中国区三星生活助手（`com.samsung.android.app.sreminder`）的最新版本。支持浏览器书签和 Python 脚本，APK 由设备直接从 Samsung 下载。
+下载中国区三星生活助手（`com.samsung.android.app.sreminder`）的最新版本。支持浏览器书签和 Python 脚本，APK 由设备直接从 Samsung 服务器下载。
 
 建议使用 Universal Installer 并将安装来源设为三星应用商店后安装
 
