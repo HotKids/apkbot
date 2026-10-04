@@ -53,10 +53,11 @@ def test_sub_persists_without_querying_or_claiming_delivery(monkeypatch, transpo
     app = AppRequest("com.example.app", "CN")
     assert db.pending_subscribers(app, release()) == [100]
     card = transport[1].send.call_args.args[1]
-    assert "下次检查时会先推送当前版本" in card.html()
+    assert "检测到新版本时将自动通知。" in card.html()
+    assert "暂无版本信息。" in card.html()
     assert db.get_subscriptions(100)[0]["release_json"] is None
     assert transport[1].send.call_args.args[2].to_dict()["inline_keyboard"] == [
-        [{"text": "🔗 获取下载链接", "callback_data": "gdl:" + app.key}]
+        [{"text": "获取下载链接", "callback_data": "gdl:" + app.key}]
     ]
 
 
@@ -67,11 +68,12 @@ def test_query_caches_app_name_and_date_for_subscription_and_list(
     store = fake_store(monkeypatch, selected)
     app = AppRequest(selected.package, "CN")
     handlers._link_once(100, app, 5)
-    assert "更新日期：2026-08-25" in transport[1].edit.call_args.args[2].html()
+    assert "更新时间：2026-08-25" in transport[1].edit.call_args.args[2].html()
     db.init_db()
     store.reset_mock()
     handlers.handle_sub(message())
-    assert transport[1].send.call_args.args[1].title == "三星生活助手 · 订阅"
+    assert "三星生活助手" in transport[1].send.call_args.args[1].html()
+    assert "版本：01.02.3 · 🇨🇳" in transport[1].send.call_args.args[1].html()
     assert db.cached_release(db.get_subscriptions(100)[0]) == selected
     assert db.pending_subscribers(app, selected) == [100]
     handlers.handle_list(message("/list"))
@@ -135,28 +137,36 @@ def test_list_is_a_rich_card_with_one_quote_and_button_per_app(transport):
         "blockquote",
         "footer",
     ]
-    assert card.title == "APKDL · 我的订阅 · 2 项"
+    assert card.title == "我的订阅（2 项）"
     assert blocks[1]["text"] == [
-        {"type": "bold", "text": "三星生活助手"},
-        " · 🌐 AUTO",
+        {
+            "type": "url",
+            "text": {"type": "bold", "text": "三星生活助手"},
+            "url": "https://galaxystore.samsung.com/detail/com.example.app",
+        },
     ]
-    assert blocks[2]["credit"] == "com.example.app"
+    assert "credit" not in blocks[2]
     assert blocks[2]["blocks"][0]["text"] == [
-        "版本 ",
-        {"type": "bold", "text": "9.4"},
-        " · 🇨🇳 CN",
+        "版本：9.4",
+        "\n包名：",
+        {"type": "code", "text": "com.example.app"},
     ]
-    assert blocks[3]["text"][0] == {"type": "code", "text": "com.other.app"}
+    assert blocks[3]["text"][0]["text"] == {"type": "bold", "text": "com.other.app"}
     assert "credit" not in blocks[4]
-    assert blocks[4]["blocks"][0]["text"] == "版本待检查"
+    assert blocks[4]["blocks"][0]["text"] == [
+        "暂无版本信息。",
+        "\n包名：",
+        {"type": "code", "text": "com.other.app"},
+    ]
     assert markup.to_dict()["inline_keyboard"] == [
         [
-            {"text": "⬇️ 三星生活助手", "callback_data": "ldl:" + named.key},
-            {"text": "⬇️ com.other.app", "callback_data": "ldl:" + unnamed.key},
+            {"text": "三星生活助手", "callback_data": "ldl:" + named.key},
+            {"text": "com.other.app", "callback_data": "ldl:" + unnamed.key},
         ]
     ]
     html = card.html()
-    assert "<b>三星生活助手</b> · 🌐 AUTO\n<blockquote>版本 <b>9.4</b>" in html
+    assert "三星生活助手</b></a>\n<blockquote>版本：9.4" in html
+    assert "AUTO" not in html and "🇨🇳" not in html and "🌐" not in html
     handlers.handle_status(message("/status"))
     status_card, status_markup = transport[1].send.call_args.args[1:]
     assert status_markup is None and "用户 100" in status_card.html()
@@ -172,7 +182,7 @@ def test_list_button_opens_a_new_download_card_and_keeps_the_list(
     handlers.handle_link_callback(
         NS(id="list", data="ldl:" + app.key, message=message(), from_user=NS(id=100))
     )
-    launch.assert_called_once_with(100, app)
+    launch.assert_called_once_with(100, app, querying=False)
     transport[0].answer_callback_query.assert_called_once()
 
 
@@ -185,7 +195,9 @@ def test_durable_callback_requeries_latest_without_subscribing(monkeypatch, tran
         id="callback", data="gdl:" + app.key, message=message(), from_user=NS(id=100)
     )
     handlers.handle_link_callback(call)
-    launch.assert_called_once_with(100, app, message_id=5, callback_id="callback")
+    launch.assert_called_once_with(
+        100, app, message_id=5, callback_id="callback", refresh=False
+    )
     assert db.get_subscriptions(100) == []
 
 
@@ -221,20 +233,24 @@ def test_refresh_button_fetches_new_version_and_url_without_subscribing(
         handlers,
         "start_link",
         lambda chat, app, **kwargs: handlers._link_once(
-            chat, app, kwargs["message_id"], kwargs["callback_id"]
+            chat,
+            app,
+            kwargs["message_id"],
+            kwargs["callback_id"],
+            refresh=kwargs["refresh"],
         ),
     )
     handlers.handle_link_callback(
         NS(
             id="refresh",
-            data=first[1]["callback_data"],
+            data=first[0]["callback_data"],
             message=message(),
             from_user=NS(id=100),
         )
     )
     card, markup = transport[1].edit.call_args.args[2:]
-    assert first[0]["url"] == SIGNED_URL
-    assert markup.to_dict()["inline_keyboard"][0][0]["url"] == fresh_url
+    assert first[1]["url"] == SIGNED_URL
+    assert markup.to_dict()["inline_keyboard"][0][1]["url"] == fresh_url
     assert newer.version_name in card.html()
     assert store.metadata.call_count == store.authorize.call_count == 2
     assert transport[1].edit.call_count == 2
@@ -259,14 +275,14 @@ def test_revoked_user_cannot_refresh_old_button(monkeypatch, transport):
     handlers.handle_link_callback(
         NS(
             id="revoked",
-            data=keyboard[1]["callback_data"],
+            data=keyboard[0]["callback_data"],
             message=message(user=200),
             from_user=NS(id=200),
         )
     )
     launch.assert_not_called()
     transport[0].answer_callback_query.assert_called_once_with(
-        "revoked", "你没有使用权限。"
+        "revoked", "当前账户无使用权限。"
     )
 
 
@@ -320,8 +336,8 @@ def test_link_delivery_never_fetches_apk_or_uploads_or_persists_url(
     keys = markup.to_dict()["inline_keyboard"]
     assert keys == [
         [
-            {"text": "⬇️ 下载", "url": SIGNED_URL},
-            {"text": "🔄 刷新", "callback_data": "gdl:" + app.key},
+            {"text": "刷新", "callback_data": "grf:" + app.key},
+            {"text": "下载", "url": SIGNED_URL},
         ]
     ]
     assert "APK sent" not in card.html() and "SHA256" not in card.html()
@@ -351,7 +367,7 @@ def test_subscriber_buttons_fetch_links_on_demand(monkeypatch, transport):
     assert [call.args[0] for call in calls] == [100, 200]
     for call in calls:
         assert call.args[2].to_dict()["inline_keyboard"] == [
-            [{"text": "🔗 获取下载链接", "callback_data": "gdl:" + app.key}]
+            [{"text": "获取下载链接", "callback_data": "gdl:" + app.key}]
         ]
     store.authorize.assert_not_called()
 
@@ -397,7 +413,8 @@ def test_source_failure_sends_no_link_and_has_safe_diagnostics(
     handlers._link_once(100, AppRequest("com.example.app", "CN"), 5)
     transport[1].edit.assert_not_called()
     store.download.assert_not_called()
-    assert "获取下载链接失败" in transport[0].edit_message_text.call_args.args[0]
+    expected = "应用信息查询失败" if operation == "metadata" else "下载链接获取失败"
+    assert expected in transport[0].edit_message_text.call_args.args[0]
     assert "private-link" not in caplog.text + str(transport[0].mock_calls)
 
 
@@ -446,9 +463,10 @@ def test_cn_bot_card_authorizes_but_never_requests_apk(
         "GET",
         "https://galaxystore.samsung.com/api/detail/com.example.app?cntyCd=CHN",
     )
-    url = transport[1].edit.call_args.args[3].to_dict()["inline_keyboard"][0][0]["url"]
+    url = transport[1].edit.call_args.args[3].to_dict()["inline_keyboard"][0][1]["url"]
     assert url == SIGNED_URL
-    assert "🇨🇳 CN" in transport[1].edit.call_args.args[2].html()
+    assert " · 🇨🇳" in transport[1].edit.call_args.args[2].html()
+    assert "🇨🇳 CN" not in transport[1].edit.call_args.args[2].html()
     transport[0].send_document.assert_not_called()
 
 
@@ -523,7 +541,7 @@ def test_refresh_failure_leaves_original_card_and_reports_via_callback(
     handlers._link_once(100, AppRequest("com.example.app", "CN"), 55, "refresh")
     transport[0].answer_callback_query.assert_called_once()
     text = transport[0].answer_callback_query.call_args.args[1]
-    assert "失败" in text or "没有更新" in text
+    assert "失败" in text or "暂时无法确认操作结果" in text
     assert "private-link" not in text + caplog.text
     transport[0].edit_message_text.assert_not_called()
     transport[0].send_message.assert_not_called()
@@ -549,17 +567,14 @@ def test_expired_callback_acknowledgement_does_not_undo_successful_edit(
     transport[0].send_message.assert_not_called()
 
 
-def test_refresh_failure_after_expired_callback_replies_under_card(
+def test_refresh_failure_after_expired_callback_keeps_card_without_reply(
     monkeypatch, transport, caplog
 ):
     store = fake_store(monkeypatch)
     store.metadata.side_effect = ServiceError("商店暂时不可用。")
     transport[0].answer_callback_query.side_effect = rejection(400, "query is too old")
     handlers._link_once(100, AppRequest("com.example.app", "CN"), 55, "expired")
-    transport[0].send_message.assert_called_once()
-    chat_id, text = transport[0].send_message.call_args.args
-    reply = transport[0].send_message.call_args.kwargs["reply_parameters"]
-    assert chat_id == 100 and "失败" in text and reply.message_id == 55
+    transport[0].send_message.assert_not_called()
     transport[0].edit_message_text.assert_not_called()
     transport[1].edit.assert_not_called()
 
@@ -568,13 +583,13 @@ def test_unsub_without_region_removes_every_region_of_that_package(transport):
     for region in ("AUTO", "CN", "US"):
         db.add_subscription(100, AppRequest("com.example.app", region))
     handlers.handle_unsub(message("/unsub com.example.app CN"))
-    assert transport[0].reply_to.call_args.args[1] == "已取消 1 个订阅。"
+    assert transport[0].reply_to.call_args.args[1] == "已取消 1 项订阅。"
     url = "https://galaxystore.samsung.com/detail/com.example.app?session_id=W_1"
     handlers.handle_unsub(message("/unsub " + url))
-    assert transport[0].reply_to.call_args.args[1] == "已取消 2 个订阅。"
+    assert transport[0].reply_to.call_args.args[1] == "已取消 2 项订阅。"
     assert db.get_subscriptions(100) == []
     handlers.handle_unsub(message("/unsub com.example.app"))
-    assert transport[0].reply_to.call_args.args[1].startswith("没有匹配的订阅")
+    assert transport[0].reply_to.call_args.args[1] == "已取消 0 项订阅。"
 
 
 def test_whitelist_replies_name_the_user_and_the_outcome(transport):
@@ -583,10 +598,10 @@ def test_whitelist_replies_name_the_user_and_the_outcome(transport):
     for text in ("/add 200 朋友", "/add 200", "/del 200", "/del 200"):
         handlers.handle_users(message(text))
     assert replies == [
-        "已将 200 加入白名单。",
-        "200 已在白名单中。",
-        "已将 200 移出白名单。",
-        "200 不在白名单中。",
+        "已将用户 200 加入白名单。",
+        "该用户已在白名单中。",
+        "已将用户 200 移出白名单。",
+        "该用户未在白名单中。",
     ]
 
 
@@ -693,7 +708,7 @@ def test_subscription_get_link_turns_same_card_into_download_and_refresh(
     store.authorize.assert_not_called()
     original_keys = transport[1].send.call_args.args[2].to_dict()["inline_keyboard"]
     assert original_keys == [
-        [{"text": "🔗 获取下载链接", "callback_data": "gdl:" + app.key}]
+        [{"text": "获取下载链接", "callback_data": "gdl:" + app.key}]
     ]
     transport[1].send.reset_mock()
 
@@ -719,8 +734,8 @@ def test_subscription_get_link_turns_same_card_into_download_and_refresh(
     assert transport[1].edit.call_args.args[:2] == (100, 55)
     buttons = transport[1].edit.call_args.args[3].to_dict()["inline_keyboard"][0]
     assert buttons == [
-        {"text": "⬇️ 下载", "url": SIGNED_URL},
-        {"text": "🔄 刷新", "callback_data": "gdl:" + app.key},
+        {"text": "刷新", "callback_data": "grf:" + app.key},
+        {"text": "下载", "url": SIGNED_URL},
     ]
     transport[1].send.assert_not_called()
     transport[0].send_message.assert_not_called()

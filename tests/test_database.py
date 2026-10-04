@@ -100,3 +100,25 @@ def test_latest_name_is_shared_across_region_preferences(monkeypatch):
     db.cache_release(AppRequest("com.example.app", "CN"), release(name="应用"), None)
     assert db.last_app_name("com.example.app") == "应用"
     assert db.last_app_name("com.other.app") is None
+
+
+def test_last_release_matches_actual_region_and_loads_legacy_records(monkeypatch):
+    us = release(region="US", name="US name")
+    cn = release(region="CN", name="CN name")
+    db.cache_release(AppRequest(us.package, "AUTO"), us, None)
+    db.cache_release(AppRequest(cn.package, "CN"), cn, None)
+    assert db.last_release(cn.package) == cn
+    assert db.last_release(us.package, "US") == us
+    assert db.last_release(cn.package, "CN") == cn
+    assert db.last_release("com.other.app") is None
+
+
+def test_last_name_keeps_fetched_name_when_newer_metadata_only_has_package():
+    package = "com.example.app"
+    db.cache_release(AppRequest(package, "CN"), release(name="Known name"), None)
+    db.cache_release(
+        AppRequest(package, "US"), release(region="US", name=package), None
+    )
+    db.cache_release(AppRequest(package), release(name=""), None)
+    assert db.last_app_name(package) == "Known name"
+    assert db.last_release(package).name == ""

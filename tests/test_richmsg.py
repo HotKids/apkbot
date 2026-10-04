@@ -8,13 +8,14 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from cards import (
     Card,
     Entry,
+    app_title,
     bold,
     help_card,
     release_card,
     subscription_card,
 )
 from galaxy_store import AppRequest
-from richmsg import RichMessenger, button_blocks
+from richmsg import RichMessenger, UnconfirmedDelivery, button_blocks
 from tests.test_galaxy_store import release
 
 
@@ -62,6 +63,70 @@ def test_confirmed_unsupported_falls_back_and_is_cached(monkeypatch):
     messenger.send(1, Card("B"))
     assert request.call_count == 1 and bot.send_message.call_count == 2
     assert not messenger.supported
+
+
+@pytest.mark.parametrize("message_id", [None, 55])
+def test_rich_transport_uses_explicit_blocks_without_automatic_links(
+    monkeypatch, message_id
+):
+    request = Mock(
+        return_value=dict(message_id=55, date=0, chat=dict(id=100, type="private"))
+    )
+    monkeypatch.setattr(apihelper, "_make_request", request)
+    messenger = RichMessenger(Mock(token="synthetic-only"))
+    card = Card("Title", ("https://example.com/store-notes",))
+    if message_id is None:
+        messenger.send(100, card)
+    else:
+        messenger.edit(100, message_id, card)
+    params = request.call_args.kwargs["params"]
+    rich = json.loads(params["rich_message"])
+    assert rich["skip_entity_detection"] is True
+    assert rich["blocks"] == card.blocks()
+    if message_id is None:
+        # sendRichMessage accepts explicit blocks, not LinkPreviewOptions.
+        assert "link_preview_options" not in params
+    else:
+        assert json.loads(params["link_preview_options"]) == {"is_disabled": True}
+
+
+@pytest.mark.parametrize("message_id", [None, 55])
+@pytest.mark.parametrize("result", [None, {}, True])
+def test_unconfirmed_rich_result_never_falls_back_or_resends(
+    monkeypatch, message_id, result
+):
+    request = Mock(return_value=result)
+    monkeypatch.setattr(apihelper, "_make_request", request)
+    bot = Mock(token="synthetic-only")
+    messenger = RichMessenger(bot)
+    with pytest.raises(UnconfirmedDelivery):
+        if message_id is None:
+            messenger.send(100, Card("Title"))
+        else:
+            messenger.edit(100, message_id, Card("Title"))
+    request.assert_called_once()
+    bot.send_message.assert_not_called()
+    bot.edit_message_text.assert_not_called()
+
+
+@pytest.mark.parametrize("message_id", [None, 55])
+@pytest.mark.parametrize("result", [None, SimpleNamespace(message_id=0), True])
+def test_unconfirmed_html_result_never_resends(message_id, result):
+    bot = Mock(
+        token="synthetic-only",
+        send_message=Mock(return_value=result),
+        edit_message_text=Mock(return_value=result),
+    )
+    messenger = RichMessenger(bot)
+    messenger.supported = False
+    with pytest.raises(UnconfirmedDelivery):
+        if message_id is None:
+            messenger.send(100, Card("Title"))
+        else:
+            messenger.edit(100, message_id, Card("Title"))
+    method = bot.send_message if message_id is None else bot.edit_message_text
+    method.assert_called_once()
+    assert method.call_args.kwargs["link_preview_options"].is_disabled is True
 
 
 @pytest.mark.parametrize(
@@ -137,28 +202,29 @@ def test_card_escaping_hierarchy_and_exact_region():
     card = release_card(release(name="<name>&", region="US"), "<script>&")
     assert "&lt;name&gt;&amp;" in card.html()
     assert "<script>" not in card.html()
-    assert "🇺🇸 US" in card.html()
-    assert "<b>版本 01.02.3</b>" in card.html()
-    assert "版本代码：123" in card.html()
+    assert "🇺🇸" in card.html() and "🇺🇸 US" not in card.html()
+    assert "<b>版本：01.02.3 · 🇺🇸</b>" in card.html()
+    assert "版本代码：<code>123</code>" in card.html()
     assert "包名：<code>com.example.app</code>" in card.html()
     facts = card.blocks()[2]
     assert facts["type"] == "table" and facts["is_bordered"] is False
     assert [row[0]["text"] for row in facts["cells"]] == [
+        "文件大小",
+        "更新时间",
         "版本代码",
-        "更新日期",
-        "地区",
-        "大小",
         "包名",
     ]
-    assert facts["cells"][4][1]["text"] == {"type": "code", "text": "com.example.app"}
+    assert facts["cells"][3][1]["text"] == {"type": "code", "text": "com.example.app"}
     assert "product ID" not in card.html()
+    assert card.blocks()[0]["text"] == app_title("com.example.app", "<name>&")
     assert card.blocks()[1]["type"] == "heading"
-    assert card.blocks()[1]["text"] == "版本 01.02.3"
-    notes = [block for block in card.blocks() if block["type"] == "details"]
-    assert len(notes) == 1 and notes[0]["is_open"] is False
-    assert any(block["type"] == "details" for block in card.blocks())
-    sections = [b for b in help_card().blocks() if b["type"] == "details"]
-    assert [b["is_open"] for b in sections] == [True, False, False]
+    assert card.blocks()[1]["text"] == "版本：01.02.3 · 🇺🇸"
+    notes = [block for block in card.blocks() if block["type"] == "blockquote"]
+    assert notes == [
+        {"type": "blockquote", "blocks": [{"type": "paragraph", "text": "<script>&"}]}
+    ]
+    assert not any(block["type"] == "details" for block in card.blocks())
+    assert "<blockquote>&lt;script&gt;&amp;</blockquote>" in card.html()
 
 
 def test_edit_updates_rich_card_and_buttons_on_same_message(monkeypatch):
@@ -177,7 +243,7 @@ def test_edit_updates_rich_card_and_buttons_on_same_message(monkeypatch):
     fields = request.call_args.kwargs["params"]
     assert fields["chat_id"] == 100 and fields["message_id"] == 55
     blocks = json.loads(fields["rich_message"])["blocks"]
-    assert blocks[1]["text"] == "版本 2.0"
+    assert blocks[1]["text"] == "版本：2.0 · 🇨🇳"
     assert blocks[-1]["buttons"] == [
         {
             "text": "下载",
@@ -252,8 +318,8 @@ def test_unchanged_edit_is_success_without_duplicate_message(monkeypatch, rich):
     bot.send_message.assert_not_called()
 
 
-INLINE = {"bold", "code"}
-BLOCKS = {"heading", "paragraph", "table", "details", "footer", "buttons", "blockquote"}
+INLINE = {"bold", "code", "url"}
+BLOCKS = {"heading", "paragraph", "table", "footer", "buttons", "blockquote"}
 ACTIONS = {"url", "callback_data"}
 
 
@@ -269,7 +335,9 @@ def valid_text(text):
     return (
         isinstance(text, dict)
         and text.get("type") in INLINE
-        and set(text) == {"type", "text"}
+        and set(text)
+        == ({"type", "text", "url"} if text["type"] == "url" else {"type", "text"})
+        and (text["type"] != "url" or text["url"].startswith("https://"))
         and valid_text(text["text"])
     )
 
@@ -290,9 +358,6 @@ def assert_valid_blocks(blocks):
             for row in block["cells"]:
                 for cell in row:
                     assert valid_text(cell["text"]) and cell["valign"] == "top"
-        if kind == "details":
-            assert valid_text(block["summary"]) and isinstance(block["is_open"], bool)
-            assert_valid_blocks(block["blocks"])
         if kind == "blockquote":
             assert_valid_blocks(block["blocks"])
             assert isinstance(block.get("credit", ""), str)
@@ -306,8 +371,8 @@ def assert_valid_blocks(blocks):
 def download_keys():
     keys = InlineKeyboardMarkup()
     keys.row(
-        InlineKeyboardButton("下载", url="https://download.samsungapps.com/a.apk"),
         InlineKeyboardButton("刷新", callback_data="gdl:key"),
+        InlineKeyboardButton("下载", url="https://download.samsungapps.com/a.apk"),
     )
     return keys
 
@@ -317,14 +382,14 @@ def download_keys():
     [
         release_card(release(), "notes"),
         release_card(release(size=None, updated_date="2026-08-25"), update=True),
-        subscription_card(AppRequest("com.example.app"), True, "Example"),
+        subscription_card(AppRequest("com.example.app"), True, name="Example"),
         help_card(),
         Card(
-            "APKDL · 我的订阅 · 1 项",
+            "我的订阅（1 项）",
             entries=(
                 Entry(
-                    (bold("名称"), " · 🌐 AUTO"),
-                    ("版本 ", bold("1.0"), " · 🇨🇳 CN"),
+                    app_title("com.example.app", "名称"),
+                    ("版本：", bold("1.0")),
                     "com.example.app",
                 ),
             ),
@@ -338,19 +403,22 @@ def test_every_card_and_button_row_matches_rich_block_shapes(card):
 
 def test_buttons_are_colored_by_action():
     (row,) = button_blocks(download_keys())
-    assert [b.get("style") for b in row["buttons"]] == ["success", "primary"]
+    assert [b.get("style") for b in row["buttons"]] == ["primary", "success"]
     assert button_blocks(None) == [] and button_blocks(InlineKeyboardMarkup()) == []
 
 
 def test_help_commands_are_tables_and_explanations_are_footers():
-    first, region, admin = [b for b in help_card().blocks() if b["type"] == "details"]
-    assert [b["type"] for b in first["blocks"]] == ["table", "footer"]
-    commands = [row[0]["text"]["text"] for row in first["blocks"][0]["cells"]]
+    blocks = help_card().blocks()
+    sections = [b for b in blocks if b["type"] == "heading" and b["size"] == 5]
+    assert [b["text"] for b in sections] == ["下载与订阅", "地区", "管理员"]
+    first, admin = [b for b in blocks if b["type"] == "table"]
+    commands = [row[0]["text"]["text"] for row in first["cells"]]
     assert "/unsub all" in commands
-    assert [b["type"] for b in admin["blocks"]] == ["table"]
+    assert admin["cells"][0][0]["text"] == {"type": "code", "text": "/check"}
+    assert len([b for b in blocks if b["type"] == "footer"]) == 1
     html = help_card().html()
     assert "<code>/check</code> — 立即检查所有订阅" in html
-    assert "<blockquote expandable><b>管理员</b>" in html
+    assert "<b>管理员</b>" in html and "expandable" not in html
 
 
 def test_rejected_button_blocks_fall_back_to_card_with_inline_keyboard(monkeypatch):

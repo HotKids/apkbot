@@ -210,14 +210,36 @@ def cached_release(row):
     return Release(**json.loads(row["release_json"])) if row["release_json"] else None
 
 
-def last_app_name(package):
+def _cached_releases(package):
     with db_conn() as db:
-        row = db.execute(
+        rows = db.execute(
             "SELECT release_json FROM galaxy_apps WHERE package=? AND release_json IS NOT NULL "
-            "ORDER BY checked_at DESC, rowid DESC LIMIT 1",
+            "ORDER BY checked_at DESC, rowid DESC",
             (package,),
-        ).fetchone()
-    return cached_release(row).name if row else None
+        ).fetchall()
+    return [cached_release(row) for row in rows]
+
+
+def last_release(package, region=None):
+    return next(
+        (
+            release
+            for release in _cached_releases(package)
+            if region is None or release.region == region
+        ),
+        None,
+    )
+
+
+def last_app_name(package):
+    return next(
+        (
+            release.name
+            for release in _cached_releases(package)
+            if release.name and release.name != package
+        ),
+        None,
+    )
 
 
 def legacy_count():

@@ -103,7 +103,7 @@ class RichMessenger:
                 if message_id is not None and self._not_modified(exc):
                     return True
                 raise
-            if message is None or message.message_id <= 0:
+            if getattr(message, "message_id", 0) <= 0:
                 raise UnconfirmedDelivery("消息送达状态未确认。")
             return message
 
@@ -117,16 +117,26 @@ class RichMessenger:
             params["reply_markup"] = json.dumps(
                 reply_markup.to_dict(), ensure_ascii=False
             )
-        params["rich_message"] = json.dumps({"blocks": blocks}, ensure_ascii=False)
+        # Rich messages use explicit blocks rather than text link previews.
+        # Keep automatic URL detection off; title links are explicit url nodes.
+        params["rich_message"] = json.dumps(
+            {"blocks": blocks, "skip_entity_detection": True}, ensure_ascii=False
+        )
         method = "sendRichMessage"
         if message_id is not None:
             # Bot API editMessageText accepts rich_message as well as text.
             method = "editMessageText"
             params["message_id"] = message_id
+            params["link_preview_options"] = types.LinkPreviewOptions(
+                is_disabled=True
+            ).to_json()
         result = apihelper._make_request(
             self.bot.token, method, method="post", params=params
         )
-        message = types.Message.de_json(result)
+        try:
+            message = types.Message.de_json(result)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise UnconfirmedDelivery("富消息送达状态未确认。") from exc
         if message is None or message.message_id <= 0:
             raise UnconfirmedDelivery("富消息送达状态未确认。")
         return message

@@ -48,7 +48,7 @@ def validate_url(url):
         host = u.hostname or ""
         port = u.port
     except ValueError:
-        raise InvalidResponse("商店数据异常（下载地址无效），请稍后重试。") from None
+        raise InvalidResponse("商店返回的下载地址无效，请稍后重试。") from None
     # No arbitrary hosts, HTTP, userinfo, custom ports, or suffix lookalikes.
     if (
         u.scheme != "https"
@@ -67,7 +67,7 @@ def validate_url(url):
             )
         )
     ):
-        raise InvalidResponse("商店数据异常（地址不属于 Samsung），请稍后重试。")
+        raise InvalidResponse("商店返回的地址不属于 Samsung，请稍后重试。")
     return url
 
 
@@ -88,7 +88,7 @@ def open_response(session, method, url, *, deadline, **kwargs):
             )
         except requests.RequestException:
             raise TransportError(
-                "无法连接 Galaxy Store，请检查服务器网络后重试。"
+                "无法连接 Galaxy Store，请稍后重试。"
             ) from None
         if response.status_code in (301, 302, 303, 307, 308):
             location = response.headers.get("Location")
@@ -102,7 +102,7 @@ def open_response(session, method, url, *, deadline, **kwargs):
             status = response.status_code
             response.close()
             raise TransportError(
-                f"商店暂时不可用（HTTP {status}），这不代表应用不存在；请稍后重试。"
+                f"商店暂时不可用（HTTP {status}），请稍后重试。"
             )
         return response
     raise TransportError("商店跳转次数过多，请稍后重试。")
@@ -116,7 +116,7 @@ def chunks(response, *, deadline, limit):
                 raise TransportError("商店响应超时，请稍后重试。")
             count += len(block)
             if count > limit:
-                raise DownloadError("商店数据异常（响应过大），请稍后重试。")
+                raise DownloadError("商店返回的信息超出限制，请稍后重试。")
             yield block
     except requests.RequestException:
         raise TransportError("与商店的连接中断，请稍后重试。") from None
@@ -196,7 +196,10 @@ class GalaxyStore:
         )
 
     def download_link(self, app):
+        # UI failure wording follows the final failed step, including AUTO fallback.
+        self.link_stage = "query"
         release = self.metadata(app)
+        self.link_stage = "download"
         try:
             return self.authorize(release)
         except StoreError:
@@ -204,15 +207,18 @@ class GalaxyStore:
                 raise
         # A US release can still fail authorization (e.g. an unusable URL).
         # AUTO then tries CN; an explicit region never switches.
-        return self.authorize(self.metadata(AppRequest(app.package, "CN")))
+        self.link_stage = "query"
+        release = self.metadata(AppRequest(app.package, "CN"))
+        self.link_stage = "download"
+        return self.authorize(release)
 
     def authorize(self, release):
         if release.needs_login:
             raise LoginRequired(
-                "此应用需要登录 Samsung 账号才能下载，bot 无法匿名获取。"
+                "此应用需要登录 Samsung 账户，当前无法获取下载链接。"
             )
         if not release.installable:
-            raise ServiceError("商店将此版本标为不可安装，暂时无法下载。")
+            raise ServiceError("此版本暂不支持安装，无法获取下载链接。")
         if release.channel == "stub":
             # The stub answer that selected this release already carries its
             # URL; asking again only adds a request and a chance of drift.
@@ -223,7 +229,7 @@ class GalaxyStore:
                 grant.release.identity != release.identity
                 or grant.release.version_name != release.version_name
             ):
-                raise VersionDrift("商店版本刚刚更新，请再试一次。")
+                raise VersionDrift("商店版本已发生变化，请重试。")
         else:
             grant = parse_ods_grant(
                 self._ods("2316", self.profile.download(release)), release
