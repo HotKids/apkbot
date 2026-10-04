@@ -126,9 +126,10 @@ void (async () => {
     action.href = url.href;
     action.hidden = false;
     action.style.display = "inline-block";
-    status.textContent = "下载链接已获取，请点击「下载」保存文件。";
+    status.textContent = "下载链接已获取。如未开始下载，请点击「下载」。";
     status.dataset.state = "ready";
     hint.textContent = "下载链接有效期约为 10 分钟，失效后请再次运行此书签。";
+    action.click();
   } catch (error) {
     status.dataset.state = "error";
     status.textContent = error.name === "AbortError" ? "请求超时，请再次运行此书签。" : error instanceof StoreError ? error.message : "暂时无法完成请求，请稍后重试。";
