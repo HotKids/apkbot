@@ -1,0 +1,10 @@
+{
+  "name": "apkbot-galaxy-store-tests",
+  "private": true,
+  "scripts": {
+    "test": "node test_userscript.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

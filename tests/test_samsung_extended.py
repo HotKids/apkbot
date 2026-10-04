@@ -8,7 +8,7 @@ import pytest
 
 import galaxy_store as protocol
 import scraper
-from tests.test_galaxy_store import metadata, release, stub
+from tests.test_galaxy_store import metadata, release
 from tests.test_scraper import Response, session
 
 
@@ -46,38 +46,6 @@ def test_regional_protocol_parameters_are_shared_by_metadata_and_full_download()
         assert (fields["mcc"], fields["mnc"], fields["csc"], fields["lang"]) == (
             "310", "260", "XAA", "en_US"
         )
-
-
-def test_discovery_uses_only_same_region_exact_samsung_endpoint():
-    http = session(
-        Response(stub("Application is not approved as stub", "0")),
-        Response(lists([{"countryURL": "http://us-odc.samsungapps.com/ods.as", "countryCode":"USA", "MCC":"310"}], request_id="2300")),
-        Response(metadata()),
-    )
-    store = scraper.GalaxyStore(http)
-    selected = store.metadata(protocol.AppRequest("com.example.app", "US"))
-    assert selected.region == "US"
-    ods_calls = [call for call in http.request.call_args_list if call.args[0] == "POST"]
-    assert urlsplit(ods_calls[0].args[1]).hostname == "hub-odc.samsungapps.com"
-    assert urlsplit(ods_calls[1].args[1]).hostname == "us-odc.samsungapps.com"
-    assert parse_qs(urlsplit(ods_calls[0].args[1]).query)["reqId"] == ["2300"]
-
-
-@pytest.mark.parametrize("url", [
-    "https://evil.test/ods.as", "https://us-odc.samsungapps.com.evil.test/ods.as",
-    "https://cn-ms.galaxyappstore.com/ods.as", "https://us-odc.samsungapps.com/other",
-    "https://us-odc.samsungapps.com/ods.as?secret=bad",
-    "https://user@us-odc.samsungapps.com/ods.as",
-])
-def test_bad_discovery_falls_back_without_following_its_url(url):
-    http = session(
-        Response(lists([{"countryURL": url, "countryCode":"USA", "MCC":"310"}], request_id="2300")), Response(metadata()),
-    )
-    store = scraper.GalaxyStore(http)
-    selected = store.ods_metadata("com.example.app", "US")
-    assert selected.region == "US"
-    assert http.request.call_args.args[1].startswith("https://us-odc.samsungapps.com/ods.as?")
-    assert http.request.call_count == 2
 
 
 def test_structured_details_ignore_repeated_unrelated_fields_but_not_identity():
@@ -179,7 +147,6 @@ def test_cn_mirror_is_attempted_only_after_both_native_rejections():
     from tests.test_galaxy_store import grant
     http = session(rejection(), rejection(), Response(grant()))
     store = scraper.GalaxyStore(http)
-    store._endpoints = dict(scraper.ODS_ENDPOINTS)
     assert store.authorize(release()).release == release()
     assert [parse_qs(urlsplit(call.args[1]).query)["reqId"][0] for call in http.request.call_args_list] == ["2311", "2316", "2801"]
 
@@ -192,7 +159,6 @@ def test_mirror_cannot_weaken_full_package_identity_or_samsung_host(changes):
     from tests.test_galaxy_store import grant
     http = session(rejection(), rejection(), Response(grant(**changes)))
     store = scraper.GalaxyStore(http)
-    store._endpoints = dict(scraper.ODS_ENDPOINTS)
     with pytest.raises(protocol.StoreError):
         store.authorize(release())
     assert http.request.call_count == 3
@@ -201,7 +167,6 @@ def test_mirror_cannot_weaken_full_package_identity_or_samsung_host(changes):
 def test_us_native_rejection_never_uses_cn_mirror():
     http = session(rejection(), rejection())
     store = scraper.GalaxyStore(http)
-    store._endpoints = dict(scraper.ODS_ENDPOINTS)
     with pytest.raises(protocol.StoreError):
         store.authorize(release(region="US"))
     assert http.request.call_count == 2
@@ -211,7 +176,6 @@ def test_us_native_rejection_never_uses_cn_mirror():
 def test_malformed_restore_cannot_trigger_mirror():
     http = session(rejection(), Response(b"malformed"))
     store = scraper.GalaxyStore(http)
-    store._endpoints = dict(scraper.ODS_ENDPOINTS)
     with pytest.raises(protocol.InvalidResponse):
         store.authorize(release())
     assert http.request.call_count == 2

@@ -103,7 +103,7 @@ def parse_input(text):
         # Share links append ?session_id=…; only the path names the package.
         if (
             u.scheme != "https"
-            or u.netloc != "galaxystore.samsung.com"
+            or u.netloc not in {"galaxystore.samsung.com", "apps.galaxyappstore.com"}
             or not u.path.startswith("/detail/")
             or u.path.count("/") != 2
         ):
@@ -316,6 +316,10 @@ def parse_ods_grant(data, release, *, restore=False, request_id=None):
     size = positive(fields, "contentsSize")
     if release.size is not None and size != release.size:
         raise VersionDrift("下载文件大小与所选版本不一致，请重试。")
+    # Only a version-bound full grant can fill missing metadata for subsequent
+    # date/log checks. Restore grants can omit their version and remain unbound.
+    if release.size is None and fields.get("version") and fields.get("versionCode"):
+        release = replace(release, size=size)
     return DownloadGrant(release, required(fields, "downLoadURI"), size)
 
 
@@ -417,11 +421,6 @@ class OdsProfile:
         params.update(dowloadType="new", deepLinkSource="N")
         return self.envelope("downloadEx2", "2311", params)
 
-
-    def discovery(self):
-        return self.envelope("countrySearchEx", "2300", dict(
-            accountCountry="", accountMcc="", latestCountryCode=REGIONS[self.region]["mcc"], whoAmI="odc"
-        ))
 
     def details(self, release, *, overview=False):
         params = dict(GUID=release.package, productID=release.product_id,

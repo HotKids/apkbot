@@ -450,7 +450,6 @@ def test_cn_bot_card_authorizes_but_never_requests_apk(
         )
     http = session(*responses)
     store = GalaxyStore(http)
-    store._endpoints = {"CN": "https://cn-ms.galaxyappstore.com/ods.as", "US": "https://us-odc.samsungapps.com/ods.as"}
     monkeypatch.setattr(handlers, "GalaxyStore", lambda: store)
     handlers._link_once(100, AppRequest("com.example.app", region), 5)
     calls = http.request.call_args_list

@@ -24,3 +24,25 @@ jobs:
         run: python -m pip check
       - name: Run tests without live credentials
         run: python -m pytest -q -p no:cacheprovider
+
+  userscript-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: galaxy-store
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: galaxy-store/package-lock.json
+      - name: Install test dependencies
+        run: npm ci --ignore-scripts
+      - name: Install Chromium
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Run offline browser checks
+        run: npm test

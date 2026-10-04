@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         Galaxy Store APK 下载
 // @namespace    https://github.com/HotKids/apkbot
-// @version      1.2.4
+// @version      1.3.0
 // @description  在 Galaxy Store 应用详情页获取 Samsung APK 下载链接。
 // @match        https://galaxystore.samsung.com/detail/*
 // @match        https://apps.galaxyappstore.com/detail/*
 // @grant        GM_xmlhttpRequest
 // @connect      vas.samsungapps.com
 // @connect      cn-ms.galaxyappstore.com
-// @connect      hub-odc.samsungapps.com
 // @connect      us-odc.samsungapps.com
 // @run-at       document-start
 // @noframes
@@ -26,7 +25,6 @@
     CN:{mcc:"460", mnc:"00", csc:"CHC", language:"zh_CN", endpoint:"https://cn-ms.galaxyappstore.com/ods.as"},
     US:{mcc:"310", mnc:"260", csc:"XAA", language:"en_US", endpoint:"https://us-odc.samsungapps.com/ods.as"}
   };
-  const endpoints = new Map();
   const readPackage = () => {
     const name = location.pathname.match(/^\/detail\/([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)$/)?.[1];
     return name && name.length <= 255 ? name : null;
@@ -151,12 +149,11 @@
     return doc.documentElement;
   }
 
-  function collectFields(root, keys) {
+  function collectFields(root) {
     const fields = Object.create(null);
-    for (const node of root.querySelectorAll("*")) {
+    for (const node of root.children) {
       if (node.children.length) continue;
       const key = node.getAttribute("name") || node.nodeName;
-      if (keys && !keys.includes(key)) continue;
       if (Object.hasOwn(fields, key)) throw new StoreError("三星商店返回的信息存在冲突，请稍后重试。");
       fields[key] = node.textContent.trim();
     }
@@ -170,7 +167,7 @@
   function odsFields(text, keys, requestId) {
     const root = xmlDocument(text, "SamsungProtocol");
     const responses = [...root.children].filter(node => node.nodeName === "response");
-    const structured = ["2300", "2290", "2291", "2801"].includes(requestId);
+    const structured = ["2290", "2291", "2801"].includes(requestId);
     if (responses.length > 1 || (structured && responses.length !== 1)) throw new StoreError("三星商店返回的信息存在冲突，请稍后重试。");
     const response = responses[0] || root;
     if (response.hasAttribute("id") && response.getAttribute("id") !== requestId) throw new StoreError("三星商店返回的接口信息不一致，请稍后重试。");
@@ -195,32 +192,11 @@
     return fields;
   }
 
-  async function request(region, method, id, params, keys, endpoint = regions[region].endpoint) {
+  async function request(region, method, id, params, keys) {
     checkPackage();
-    const fields = odsFields(await requestBytes(`${endpoint}?reqId=${id}&ot=01&ct=B`, "POST", await envelope(region, method, id, params)), keys, id);
+    const fields = odsFields(await requestBytes(`${regions[region].endpoint}?reqId=${id}&ot=01&ct=B`, "POST", await envelope(region, method, id, params)), keys, id);
     checkPackage();
     return fields;
-  }
-
-  function trustedEndpoint(value, region) {
-    const expected = new URL(regions[region].endpoint);
-    let url;
-    try { url = new URL(value); } catch { throw new StoreError("三星商店返回的地区地址无效，请稍后重试。"); }
-    if (!["http:", "https:"].includes(url.protocol) || url.hostname !== expected.hostname || url.pathname !== "/ods.as" || url.username || url.password || url.port || url.search || url.hash || /[\x00-\x20\s\\]/.test(value)) throw new StoreError("三星商店返回的地区地址无效，请稍后重试。");
-    url.protocol = "https:";
-    return url.href;
-  }
-
-  async function resolveEndpoint(region) {
-    if (endpoints.has(region)) return endpoints.get(region);
-    let endpoint = regions[region].endpoint;
-    try {
-      const fields = await request(region, "countrySearchEx", "2300", {accountCountry:"", accountMcc:"", latestCountryCode:regions[region].mcc, whoAmI:"odc"}, ["countryURL", "MCC", "countryCode"], region === "CN" ? endpoint : "https://hub-odc.samsungapps.com/ods.as");
-      if (fields.MCC !== regions[region].mcc || fields.countryCode !== (region === "CN" ? "CHN" : "USA")) throw new StoreError("三星商店返回的地区信息不一致，请稍后重试。");
-      endpoint = trustedEndpoint(fields.countryURL, region);
-    } catch { checkPackage(); }
-    endpoints.set(region, endpoint);
-    return endpoint;
   }
 
   function downloadUrl(value) {
@@ -244,12 +220,15 @@
   }
 
   async function odsDownload(region) {
-    const endpoint = await resolveEndpoint(region);
+    if (status.dataset.phase !== "refresh") {
+      status.dataset.phase = "query";
+      status.textContent = "正在查询应用信息，请稍候。";
+    }
     const metadata = await request(region, "getDownloadInfo", "2298", {
       mode:"directDownload", guid:packageName, productID:"", imei:identity, extuk:identity,
       stduk:identity, predeployed:"0", unifiedPaymentYN:"Y", lkAppIncludedYN:"Y",
       betaTestYN:"N", minorYN:"N", stateCode:""
-    }, ["GUID", "productID", "productName", "version", "versionCode", "realContentsSize", "needToLogin", "installableYN"], endpoint);
+    }, ["GUID", "productID", "productName", "version", "versionCode", "realContentsSize", "needToLogin", "installableYN"]);
     if (metadata.GUID !== packageName || !/^\d{1,30}$/.test(metadata.productID || "") || !metadata.version || !positive(metadata.versionCode) || (metadata.realContentsSize && !positive(metadata.realContentsSize))) throw new StoreError("三星商店返回的应用信息不完整，请稍后重试。");
     if (metadata.needToLogin === "1") throw new StoreError("此版本需要登录 Samsung 账户，当前无法获取下载链接。");
     if (metadata.needToLogin !== "0" || metadata.installableYN !== "Y") throw new StoreError("当前无法获取此版本的下载链接。");
@@ -264,13 +243,13 @@
     let grant, usedRestore = false, usedMirror = false;
     try {
       // Request the full APK without assuming a locally installed version.
-      grant = await request(region, "downloadEx2", "2311", {...params, dowloadType:"new", deepLinkSource:"N"}, keys, endpoint);
+      grant = await request(region, "downloadEx2", "2311", {...params, dowloadType:"new", deepLinkSource:"N"}, keys);
     } catch (error) {
       if (!(error instanceof HttpStatusError || error instanceof ServiceError)) throw error;
       checkPackage();
       usedRestore = true;
       try {
-        grant = await request(region, "downloadForRestore", "2316", {...params, downloadType:"new", triggeredFrom:"DETAIL_PAGE", deepLinkSource:""}, keys, endpoint);
+        grant = await request(region, "downloadForRestore", "2316", {...params, downloadType:"new", triggeredFrom:"DETAIL_PAGE", deepLinkSource:""}, keys);
       } catch (restoreError) {
         if (region !== "CN" || !(restoreError instanceof HttpStatusError || restoreError instanceof ServiceError)) throw restoreError;
         checkPackage();
@@ -278,7 +257,7 @@
         grant = await request(region, "downloadInfoForTencent", "2801", {
           stduk:identity, extuk:identity, GUID:packageName, tencentSource:"general",
           lastInterfaceName:"searchProductListEx2Notc"
-        }, keys, endpoint);
+        }, keys);
         usedMirror = true;
       }
     }
@@ -306,19 +285,20 @@
   }
 
   async function releaseDetails(result) {
-    const endpoint = await resolveEndpoint(result.region);
     const params = {GUID:packageName, productID:result.productId, imei:identity, stduk:identity, extuk:identity};
     const keys = ["GUID", "productID", "version", "versionCode", "realContentsSize", "productName", "lastUpdateDate"];
     const mainParams = {...params, productImgWidth:"135", productImgHeight:"135", lkAppIncludedYN:"Y", predeployed:"0", triggeredFrom:"detail"};
     const matchesMain = fields => fields.GUID === packageName && fields.productID === result.productId && fields.version === result.version && positive(fields.versionCode) === positive(result.versionCode) && positive(fields.realContentsSize) === positive(result.size);
-    const before = await request(result.region, "guidProductDetailExMain", "2290", mainParams, keys, endpoint);
+    const before = await request(result.region, "guidProductDetailExMain", "2290", mainParams, keys);
     if (!matchesMain(before)) return result;
-    const overview = await request(result.region, "guidProductDetailExOverview", "2291", {...params, imgWidth:"1080", imgHeight:"1920", runestoneYn:"N", userAge:""}, keys, endpoint);
+    const overview = await request(result.region, "guidProductDetailExOverview", "2291", {...params, imgWidth:"1080", imgHeight:"1920", runestoneYn:"N", userAge:""}, keys);
     if (overview.version !== result.version || positive(overview.realContentsSize) !== positive(result.size) || (overview.GUID && overview.GUID !== packageName) || (overview.productID && overview.productID !== result.productId) || (overview.versionCode && positive(overview.versionCode) !== positive(result.versionCode))) return result;
+    const updated = storeDate(overview.lastUpdateDate);
+    if (!updated) return result;
     // Overview omits the product ID and version code; bind it between matching main responses.
-    const after = await request(result.region, "guidProductDetailExMain", "2290", mainParams, keys, endpoint);
+    const after = await request(result.region, "guidProductDetailExMain", "2290", mainParams, keys);
     if (!matchesMain(after)) return result;
-    return {...result, name:after.productName || result.name, updated:storeDate(overview.lastUpdateDate)};
+    return {...result, name:after.productName || result.name, updated};
   }
 
   function resetPackage(value) {

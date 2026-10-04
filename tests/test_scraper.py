@@ -42,13 +42,6 @@ def session(*responses):
     return Mock(request=Mock(side_effect=list(responses)))
 
 
-@pytest.fixture(autouse=True)
-def fixed_ods_endpoints(monkeypatch):
-    # Endpoint discovery has its own transport tests; these fixtures describe
-    # the metadata/authorization response sequence after regional resolution.
-    monkeypatch.setattr(scraper.GalaxyStore, "_endpoint", lambda self, region: scraper.ODS_ENDPOINTS[region])
-
-
 @pytest.mark.parametrize(
     "url",
     [

@@ -10,7 +10,7 @@ assert.match(source, /@grant\s+GM_xmlhttpRequest/);
 assert.match(source, /@run-at\s+document-start/);
 assert.match(source, /@match\s+https:\/\/apps\.galaxyappstore\.com\/detail\/\*/);
 assert.doesNotMatch(source, /GM_addElement|__apkbotStoreGuard|samsungapps:/);
-assert.deepEqual([...source.matchAll(/@connect\s+(\S+)/g)].map(match => match[1]).sort(), ["cn-ms.galaxyappstore.com", "hub-odc.samsungapps.com", "us-odc.samsungapps.com", "vas.samsungapps.com"]);
+assert.deepEqual([...source.matchAll(/@connect\s+(\S+)/g)].map(match => match[1]).sort(), ["cn-ms.galaxyappstore.com", "us-odc.samsungapps.com", "vas.samsungapps.com"]);
 
 const packageName = "com.samsung.android.app.sreminder";
 const metadata = {
@@ -28,7 +28,7 @@ const stubDenied = stub({resultCode:"0", resultMsg:"Application is not approved 
 function gmBridge(overrides) {
   let index = 0;
   window.GM_xmlhttpRequest = options => {
-    const auxiliary = ["2300", "2290", "2291"].includes(new URL(options.url).searchParams.get("reqId"));
+    const auxiliary = ["2290", "2291"].includes(new URL(options.url).searchParams.get("reqId"));
     const responseOverride = auxiliary ? null : overrides?.[index++];
     const controller = new AbortController();
     const timer = setTimeout(() => options.ontimeout(), options.timeout);
@@ -67,7 +67,7 @@ function gmBridge(overrides) {
           apkRequests++;
           return route.fulfill({contentType:"application/vnd.android.package-archive", headers:{"Content-Disposition":"attachment; filename=fixture.apk"}, body:Buffer.alloc(1234)});
         }
-        assert.ok(["vas.samsungapps.com", "cn-ms.galaxyappstore.com", "hub-odc.samsungapps.com", "us-odc.samsungapps.com"].includes(url.hostname), "Only Samsung protocol hosts are queried");
+        assert.ok(["vas.samsungapps.com", "cn-ms.galaxyappstore.com", "us-odc.samsungapps.com"].includes(url.hostname), "Only fixed Samsung protocol hosts are queried");
         if (url.hostname === "vas.samsungapps.com") {
           assert.equal(request.method(), "GET");
           assert.equal(url.pathname, "/stub/stubDownload.as");
@@ -76,14 +76,12 @@ function gmBridge(overrides) {
           assert.equal(url.searchParams.get("csc"), "XAA");
         } else {
           assert.equal(request.method(), "POST");
-          assert.ok(["2300", "2290", "2291", "2298", "2311", "2316", "2801"].includes(url.searchParams.get("reqId")));
+          assert.ok(["2290", "2291", "2298", "2311", "2316", "2801"].includes(url.searchParams.get("reqId")));
           const region = url.hostname === "cn-ms.galaxyappstore.com" ? "CN" : "US";
           assert.match(request.postData(), region === "CN" ? /mcc="460" mnc="00" csc="CHC"/ : /mcc="310" mnc="260" csc="XAA"/);
-          if (["2300", "2290", "2291"].includes(url.searchParams.get("reqId"))) {
+          if (["2290", "2291"].includes(url.searchParams.get("reqId"))) {
             requests.extra.push({url, body:request.postData()});
-            const response = url.searchParams.get("reqId") === "2300"
-              ? (typeof options.discovery === "function" ? options.discovery(region) : options.discovery) ?? ods({countryURL:region === "CN" ? "https://cn-ms.galaxyappstore.com/ods.as" : "https://us-odc.samsungapps.com/ods.as", MCC:region === "CN" ? "460" : "310", countryCode:region === "CN" ? "CHN" : "USA"}, "2300")
-              : (typeof options.details?.[url.searchParams.get("reqId")] === "function" ? options.details[url.searchParams.get("reqId")](region, auxiliaryCount[url.searchParams.get("reqId")] = (auxiliaryCount[url.searchParams.get("reqId")] || 0) + 1) : options.details?.[url.searchParams.get("reqId")]) ?? ods({}, url.searchParams.get("reqId"));
+            const response = (typeof options.details?.[url.searchParams.get("reqId")] === "function" ? options.details[url.searchParams.get("reqId")](region, auxiliaryCount[url.searchParams.get("reqId")] = (auxiliaryCount[url.searchParams.get("reqId")] || 0) + 1) : options.details?.[url.searchParams.get("reqId")]) ?? ods({}, url.searchParams.get("reqId"));
             if (options.auxiliaryDelay) await new Promise(resolve => setTimeout(resolve, options.auxiliaryDelay));
             return route.fulfill({contentType:"application/xml", headers:{"Access-Control-Allow-Origin":"*"}, ...(typeof response === "string" ? {body:response} : response)}).catch(() => {});
           }
@@ -91,6 +89,7 @@ function gmBridge(overrides) {
         requests.push({url, body:request.postData()});
         const response = responses[requests.length - 1];
         assert.ok(response, "No unexpected extra metadata or authorization requests");
+        if (options.beforeResponseId === url.searchParams.get("reqId")) await options.duringRequest(page);
         if (options.delay) await new Promise(resolve => setTimeout(resolve, options.delay));
         return route.fulfill({contentType:"application/xml", headers:{"Access-Control-Allow-Origin":"*"}, ...(typeof response === "string" ? {body:response} : response)}).catch(() => {});
       });
@@ -105,7 +104,7 @@ function gmBridge(overrides) {
         const downloadEvent = expected === "ready" && !options.blockAutomaticDownload ? page.waitForEvent("download", {timeout:5000}) : null;
         downloadEvent?.catch(() => {});
         await page.locator("#apkbot-download div a").click();
-        if (options.duringRequest) await options.duringRequest(page);
+        if (options.duringRequest && !options.beforeResponseId) await options.duringRequest(page);
         await page.waitForFunction(() => ["ready", "error"].includes(document.querySelector("#apkbot-download [data-state]")?.dataset.state));
         assert.equal(await page.locator("[data-state]").getAttribute("data-state"), expected, name);
         assert.equal(await page.locator("#apkbot-download div a").textContent(), expected === "ready" ? "下载" : "获取");
@@ -146,6 +145,12 @@ function gmBridge(overrides) {
       } finally { await page.close(); }
     }
 
+    const nestedStub = stub(us).replace("<productId>", "<alternativeProduct><productId>").replace("</downloadURI>", "</downloadURI></alternativeProduct>");
+    await run("nested stub fields cannot authorize another product branch", [nestedStub, '<SamsungProtocol><errorString errorCode="4002">Denied</errorString></SamsungProtocol>'], "error", (_, requests) => {
+      assert.equal(requests.length, 2);
+      assert.equal(requests[1].url.searchParams.get("reqId"), "2298");
+    }, {query:"?cntyCd=USA"});
+    await run("a valid stub ignores unrelated nested metadata instead of overriding direct fields", [stub(us).replace("</result>", "<metadata><versionCode>999</versionCode></metadata></result>")], "ready", (_, requests) => assert.equal(requests.length, 1), {query:"?cntyCd=USA"});
     await run("explicit US recovers through its own ODS without changing region", [stubDenied, xml(metadata), xml(grant)], "ready", async page => {
       assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /🇺🇸/);
     }, {query:"?cntyCd=USA"});
@@ -236,9 +241,8 @@ function gmBridge(overrides) {
       assert.equal(await page.locator("#apkbot-download div a").textContent(), "获取");
     });
     await run("switching apps stops restore after primary authorization rejection", [xml(metadata), denied, xml(legacyGrant)], "error", (_, requests) => assert.equal(requests.length, 2), {
-      delay:100,
+      beforeResponseId:"2311",
       duringRequest:async page => {
-        await page.waitForRequest(request => new URL(request.url()).searchParams.get("reqId") === "2311");
         await page.evaluate(() => history.pushState(null, "", "/detail/com.example.other?cntyCd=CHN"));
       }
     });
@@ -247,6 +251,11 @@ function gmBridge(overrides) {
       duringRequest:page => page.evaluate(() => history.pushState(null, "", "/detail/com.example.other?cntyCd=CHN"))
     });
     await run("AUTO tries US then CN when the catalog is restricted", [stubDenied, denied, xml(metadata), xml(grant)], "ready", (_, requests) => assert.equal(requests.length, 4), {query:""});
+    await run("CN metadata failure after US authorization rejection is a query failure", [stubDenied, xml(metadata), denied, denied, {status:503, body:"unavailable"}], "error", async (page, requests) => {
+      assert.equal(requests.at(-1).url.hostname, "cn-ms.galaxyappstore.com");
+      assert.equal(requests.at(-1).url.searchParams.get("reqId"), "2298");
+      assert.match(await page.locator("#apkbot-download [data-state]").textContent(), /^应用信息查询失败：/);
+    }, {query:""});
     await run("AUTO keeps an available US full package", [stub(us)], "ready", async (page, requests) => {
       assert.equal(requests.length, 1);
       assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /🇺🇸/);
@@ -292,15 +301,15 @@ function gmBridge(overrides) {
       "2291":ods(overviewDetails, "2291").replace('</list>', '<extList name="dataSafetyList"><extList name="dataSafety">first</extList><extList name="dataSafety">second</extList></extList><extList name="curatedComponentList"><extList name="componentInfo"><type>one</type></extList><extList name="componentInfo"><type>two</type></extList></extList></list>')
     };
     await run("matching detail sandwich displays the store date without an update log", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
-      assert.deepEqual(requests.extra.map(r => r.url.searchParams.get("reqId")), ["2300", "2290", "2291", "2290"]);
+      assert.deepEqual(requests.extra.map(r => r.url.searchParams.get("reqId")), ["2290", "2291", "2290"]);
       assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /版本：9\.4\.02\.7 · 2026-08-25\n大小：/);
       assert.equal(await page.locator("#apkbot-download details").count(), 0);
       assert.equal(await page.locator("#apkbot-download h2 a").getAttribute("href"), `https://galaxystore.samsung.com/detail/${packageName}`);
     }, {details:detailResponses});
-    await run("refresh reuses discovery and preserves one card without another automatic transfer", [xml(metadata), xml(grant), xml(metadata), xml(grant)], "ready", async (page, requests) => {
+    await run("refresh preserves a matching store date without another automatic transfer", [xml(metadata), xml(grant), xml(metadata), xml(grant)], "ready", async (page, requests) => {
       await page.locator("#apkbot-download button").click();
       await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').textContent === "下载链接已更新。");
-      assert.equal(requests.extra.filter(r => r.url.searchParams.get("reqId") === "2300").length, 1);
+      assert.deepEqual(requests.extra.map(r => r.url.searchParams.get("reqId")), ["2290", "2291", "2290", "2290", "2291", "2290"]);
       assert.match(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /版本：9\.4\.02\.7 · 2026-08-25\n大小：/);
     }, {details:detailResponses});
     await run("refresh hides a date that the store no longer supplies", [xml(metadata), xml(grant), xml(metadata), xml(grant)], "ready", async page => {
@@ -309,16 +318,10 @@ function gmBridge(overrides) {
       await page.waitForFunction(() => document.querySelector('#apkbot-download [role="status"]').textContent === "下载链接已更新。");
       assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /\d{4}-\d{2}-\d{2}/);
     }, {details:{...detailResponses, "2291":(_, count) => ods({...overviewDetails, lastUpdateDate:count === 1 ? "2026;08;25;" : ""}, "2291")}});
-    for (const endpoint of ["http://cn-ms.galaxyappstore.com/ods.as", "https://evil.example/ods.as", "https://cn-ms.galaxyappstore.com.example.org/ods.as", "https://cn-ms.galaxyappstore.com/other", "https://cn-ms.galaxyappstore.com/ods.as?secret=1", "https://user@cn-ms.galaxyappstore.com/ods.as", "https://cn-ms.galaxyappstore.com:8443/ods.as"]) {
-      await run("discovery only upgrades or retains a fixed trusted region endpoint", [xml(metadata), xml(grant)], "ready", (_, requests) => {
-        assert.equal(requests[0].url.origin, "https://cn-ms.galaxyappstore.com");
-        assert.equal(requests.extra.filter(r => r.url.searchParams.get("reqId") === "2300").length, 1);
-      }, {discovery:ods({countryURL:endpoint, MCC:"460", countryCode:"CHN"}, "2300")});
-    }
-    await run("failed endpoint discovery uses the fixed catalog without another discovery loop", [xml(metadata), xml(grant)], "ready", null, {discovery:{status:503, body:"unavailable"}});
     for (const date of ["", "2026;02;30;", "2026-08-25", "2026;08;25;extra"]) {
-      await run("missing or invalid store dates hide the date field", [xml(metadata), xml(grant)], "ready", async page => {
+      await run("missing or invalid store dates skip the final recheck and hide the date field", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
         assert.doesNotMatch(await page.locator("#apkbot-download p:nth-of-type(2)").textContent(), /\d{4}-\d{2}-\d{2}/);
+        assert.deepEqual(requests.extra.map(r => r.url.searchParams.get("reqId")), ["2290", "2291"]);
       }, {details:{...detailResponses, "2291":ods({...overviewDetails, lastUpdateDate:date}, "2291")}});
     }
     await run("overview with a different version is not attached to the download", [xml(metadata), xml(grant)], "ready", async (page, requests) => {
@@ -368,9 +371,8 @@ function gmBridge(overrides) {
       assert.equal(requests[3].url.hostname, "us-odc.samsungapps.com");
     });
     await run("changing region during a request stops old catalog authorization", [xml(metadata)], "error", (_, requests) => assert.equal(requests.length, 1), {
-      delay:100,
+      beforeResponseId:"2298",
       duringRequest:async page => {
-        await page.waitForRequest(request => new URL(request.url()).searchParams.get("reqId") === "2298");
         await page.evaluate(() => history.pushState(null, "", "?cntyCd=USA"));
       }
     });
@@ -383,10 +385,6 @@ function gmBridge(overrides) {
     }, {details:{...detailResponses, "2291":ods({...overviewDetails, realContentsSize:"999"}, "2291")}});
     await run("malformed protocol returnCode is not an authorization rejection", [xml(metadata), denied.replace('<SamsungProtocol>', '<SamsungProtocol><response returnCode="invalid">').replace('</SamsungProtocol>', '</response></SamsungProtocol>')], "error", (_, requests) => assert.equal(requests.length, 2));
     await run("a captured explicit region survives the site's same-document error page", [xml(metadata), xml(grant)], "ready", null, {html:'<script>history.replaceState(null,"","/error/4002")</script>'});
-    await run("US endpoint discovery cannot switch to the CN catalog", [stubDenied, xml(metadata), xml(grant)], "ready", (_, requests) => {
-      assert.equal(requests[1].url.hostname, "us-odc.samsungapps.com");
-      assert.ok(requests.every(r => r.url.hostname !== "cn-ms.galaxyappstore.com"));
-    }, {query:"?cntyCd=USA", discovery:ods({countryURL:"http://cn-ms.galaxyappstore.com/ods.as"}, "2300")});
     const outside = await browser.newPage();
     try {
       await outside.addInitScript({content:source});

@@ -1,9 +1,11 @@
 """apkbot commands. Private chats, durable callbacks, and confirmed-send state."""
 
 from html import escape
+from contextlib import contextmanager
 import logging
 import threading
 from dataclasses import replace
+from weakref import WeakValueDictionary
 
 import telebot
 from telebot.types import (
@@ -39,6 +41,31 @@ messages = RichMessenger(bot)
 logger = logging.getLogger("apkdl-bot")
 check_lock = threading.Lock()
 _link_slots = threading.BoundedSemaphore(2)
+_operation_registry_lock = threading.Lock()
+_app_operations = WeakValueDictionary()
+_card_operations = WeakValueDictionary()
+
+
+def _operation_lock(registry, key):
+    with _operation_registry_lock:
+        lock = registry.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            registry[key] = lock
+        return lock
+
+
+@contextmanager
+def _app_operation(app):
+    # Selection through publication has one owner; completion order must not
+    # let an older in-flight result replace newer application state.
+    lock = _operation_lock(_app_operations, app.key)
+    acquired = lock.acquire(timeout=config.REQUEST_TIMEOUT)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            lock.release()
 
 
 def allowed_user(user_id):
@@ -103,6 +130,21 @@ def answer_link_callback(callback_id, text):
 def _link_once(
     chat_id, app, progress_id, callback_id=None, *, refresh=False, querying=True
 ):
+    with _app_operation(app) as acquired:
+        if acquired:
+            return _link_owned(
+                chat_id, app, progress_id, callback_id,
+                refresh=refresh, querying=querying,
+            )
+        if callback_id:
+            answer_link_callback(callback_id, "当前请求较多，请稍后重试。")
+        else:
+            edit_progress(chat_id, progress_id, "当前请求较多，请稍后重试。")
+
+
+def _link_owned(
+    chat_id, app, progress_id, callback_id=None, *, refresh=False, querying=True
+):
     def report(text):
         if not callback_id:
             edit_progress(chat_id, progress_id, escape(text))
@@ -158,11 +200,22 @@ def _link_once(
 def start_link(
     chat_id, app, message_id=None, callback_id=None, *, refresh=False, querying=True
 ):
-    if not _link_slots.acquire(blocking=False):
+    def busy():
         if callback_id:
             answer_link_callback(callback_id, "当前请求较多，请稍后重试。")
         else:
             bot.send_message(chat_id, "当前请求较多，请稍后重试。")
+
+    card_lock = None
+    if message_id is not None:
+        card_lock = _operation_lock(_card_operations, (chat_id, message_id))
+        if not card_lock.acquire(blocking=False):
+            busy()
+            return
+    if not _link_slots.acquire(blocking=False):
+        if card_lock:
+            card_lock.release()
+        busy()
         return
     try:
         if message_id is None:
@@ -184,10 +237,14 @@ def start_link(
                     querying=querying,
                 )
             finally:
+                if card_lock:
+                    card_lock.release()
                 _link_slots.release()
 
         threading.Thread(target=worker, daemon=True).start()
     except Exception:
+        if card_lock:
+            card_lock.release()
         _link_slots.release()
         raise
 
@@ -204,19 +261,26 @@ def notify_release(app, release, notes):
             db.mark_notified(chat_id, app, release)
 
 
-def _check_app(app, store, selected=None):
-    previous, previous_notes = db.app_cache(app)
-    selected = selected or store.metadata(app)
-    if (previous and selected.identity == previous.identity
-        and selected.version_name == previous.version_name and selected.size == previous.size
-        and previous.updated_date is not None):
-        # Already matched details remain valid for this exact store version.
-        selected = replace(selected, updated_date=previous.updated_date)
-        notes = previous_notes
-    else:
-        selected, notes = store.details(selected)
-    db.cache_release(app, selected, notes)
-    notify_release(app, selected, notes)
+def _check_app(app, store, candidate=None):
+    with _app_operation(app) as acquired:
+        if not acquired:
+            raise StoreError("当前请求较多，请稍后重试。")
+        previous, previous_notes = db.app_cache(app)
+        try:
+            selected = store.update_metadata(candidate) if candidate else None
+        except StoreError:
+            selected = None
+        selected = selected or store.metadata(app)
+        if (previous and selected.identity == previous.identity
+            and selected.version_name == previous.version_name and selected.size == previous.size
+            and previous.updated_date is not None):
+            # Already matched details remain valid for this exact store version.
+            selected = replace(selected, updated_date=previous.updated_date)
+            notes = previous_notes
+        else:
+            selected, notes = store.details(selected)
+        db.cache_release(app, selected, notes)
+        notify_release(app, selected, notes)
 
 
 def check_app(app):
@@ -256,11 +320,7 @@ def run_check_all(triggered_by=None):
                         row = batch.get(region, {}).get(app.package)
                         # A missing/partial row says nothing about availability.
                         # The single-app path also preserves AUTO's US→CN policy.
-                        try:
-                            selected = store.update_metadata(row) if row else None
-                        except StoreError:
-                            selected = None
-                        _check_app(app, store, selected)
+                        _check_app(app, store, row)
                         succeeded += 1
                     except Exception:
                         failed += 1

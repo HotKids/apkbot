@@ -25,9 +25,7 @@ from galaxy_store import (
     VersionDrift,
     match_cn_details,
     match_ods_details,
-    ods_lists,
     parse_update_list,
-    required,
     xml_fields,
     parse_ods_grant,
     parse_ods_metadata,
@@ -36,7 +34,6 @@ from galaxy_store import (
 
 STUB_URL = "https://vas.samsungapps.com/stub/stubDownload.as"
 ODS_URL = "https://cn-ms.galaxyappstore.com/ods.as"
-ODS_HUBS = {"CN": ODS_URL, "US": "https://hub-odc.samsungapps.com/ods.as"}
 ODS_ENDPOINTS = {"CN": ODS_URL, "US": "https://us-odc.samsungapps.com/ods.as"}
 METADATA_LIMIT = 2_000_000
 REDIRECT_LIMIT = 5
@@ -164,7 +161,6 @@ class GalaxyStore:
         self.session = session or new_session()
         self.profile = OdsProfile()
         self._stub_grant = None
-        self._endpoints = {}
 
     def __enter__(self):
         return self
@@ -175,30 +171,6 @@ class GalaxyStore:
     def _profile(self, region):
         return replace(self.profile, region=region)
 
-    def _endpoint(self, region):
-        if region in self._endpoints:
-            return self._endpoints[region]
-        endpoint = ODS_ENDPOINTS[region]
-        try:
-            data = self._post(ODS_HUBS[region], "2300", self._profile(region).discovery())
-            rows = ods_lists(data, "2300", {"countryURL", "countryCode", "MCC"})
-            if len(rows) != 1:
-                raise InvalidResponse("商店返回的地区信息不完整。")
-            values = rows[0]
-            if (required(values, "countryCode") != REGIONS[region]["country"]
-                or required(values, "MCC") != REGIONS[region]["mcc"]):
-                raise InvalidResponse("商店返回的地区信息不一致。")
-            candidate = values.get("countryURL", "")
-            # Discovery cannot expand the fixed region trust boundary.
-            if candidate.startswith("http://"):
-                candidate = "https://" + candidate[7:]
-            if candidate != endpoint:
-                raise InvalidResponse("商店返回的地区地址无效。")
-        except StoreError:
-            pass
-        self._endpoints[region] = endpoint
-        return endpoint
-
     def _post(self, endpoint, request_id, payload):
         return request_bytes(
             self.session, "POST",
@@ -208,7 +180,7 @@ class GalaxyStore:
         )
 
     def _ods(self, request_id, payload, *, region="CN"):
-        return self._post(self._endpoint(region), request_id, payload)
+        return self._post(ODS_ENDPOINTS[region], request_id, payload)
 
     def ods_metadata(self, package, region):
         return parse_ods_metadata(
